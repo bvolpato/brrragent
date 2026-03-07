@@ -1,0 +1,13 @@
+[project]
+name = "brrragent"
+version = "0.1.0"
+description = "Reusable agentic react loop with MCP tool calling via OpenRouter"
+requires-python = ">=3.12"
+dependencies = [
+    "openai>=1.0.0",
+]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=8.0.0",
+]
