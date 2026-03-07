@@ -1,6 +1,6 @@
 [project]
 name = "brrragent"
-version = "0.2.0"
+version = "0.3.0"
 description = "Reusable agentic react loop with MCP tool calling (OpenRouter + Gemini direct)"
 requires-python = ">=3.12"
 dependencies = [
