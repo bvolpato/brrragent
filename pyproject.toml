@@ -1,13 +1,23 @@
 [project]
 name = "brrragent"
-version = "0.1.0"
-description = "Reusable agentic react loop with MCP tool calling via OpenRouter"
+version = "0.2.0"
+description = "Reusable agentic react loop with MCP tool calling (OpenRouter + Gemini direct)"
 requires-python = ">=3.12"
 dependencies = [
     "openai>=1.0.0",
 ]
 
+[project.optional-dependencies]
+gemini = ["google-genai>=1.0.0"]
+
 [tool.uv]
 dev-dependencies = [
     "pytest>=8.0.0",
 ]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/brrragent"]
