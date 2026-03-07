@@ -55,8 +55,8 @@ The routing decision is automatic based on model name and available environment 
 |---|---|---|
 | `google/gemini-3.1-pro-preview` | ✅ | **Gemini direct** (free, no OpenRouter premium) |
 | `google/gemini-3.1-pro-preview` | ❌ | **OpenRouter** (uses `OPENROUTER_API_KEY`) |
-| `anthropic/claude-4-sonnet` | — | **OpenRouter** (always) |
-| `openai/gpt-4o` | — | **OpenRouter** (always) |
+| `anthropic/claude-4.6-sonnet` | — | **OpenRouter** (always) |
+| `openai/gpt-5.4` | — | **OpenRouter** (always) |
 
 You can override routing by passing `api_key` explicitly:
 ```python
