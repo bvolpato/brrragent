@@ -1,9 +1,9 @@
 """
 MCP Tool Bridge.
 
-Converts any MCP JSON-RPC endpoint into OpenAI-style function definitions
-so an agentic loop can call web_search, news_search, read_url, etc.
-via OpenRouter / OpenAI function calling.
+Converts any MCP JSON-RPC endpoint into tool definitions for LLM function
+calling.  Supports both OpenAI-compatible (OpenRouter, OpenAI) and
+Google genai (Gemini) formats.
 """
 
 import json
@@ -23,8 +23,8 @@ class McpToolCaller:
     """
     HTTP client for an MCP JSON-RPC endpoint.
 
-    Discovers tool schemas, converts them to OpenAI-compatible function
-    definitions, and executes tool calls via JSON-RPC.
+    Discovers tool schemas, converts them to function-call definitions
+    (OpenAI or Google genai format), and executes tool calls via JSON-RPC.
     """
 
     def __init__(
@@ -98,6 +98,33 @@ class McpToolCaller:
                 },
             })
         return tools
+
+    # ── Google genai FunctionDeclarations ─────────────────────────────────
+
+    def get_genai_tools(self):
+        """
+        Build google.genai Tool objects from MCP schemas.
+
+        Returns a list containing a single Tool with all FunctionDeclarations.
+        Requires google-genai to be installed (lazy import).
+        """
+        try:
+            from google.genai import types as gt
+        except ImportError as e:
+            raise ImportError("google-genai required: pip install google-genai") from e
+
+        declarations = []
+        for schema in self.get_filtered_schemas():
+            input_schema = schema.get("inputSchema", {})
+            params = _clean_schema(input_schema)
+            decl = gt.FunctionDeclaration(
+                name=schema["name"],
+                description=schema.get("description", "")[:500],
+                parameters=params,
+            )
+            declarations.append(decl)
+
+        return [gt.Tool(function_declarations=declarations)]
 
     # ── Tool execution ────────────────────────────────────────────────────
 

@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import time
+from typing import Callable, Optional
 
 from openai import OpenAI
 
@@ -44,7 +45,7 @@ def run_agent(
     temperature: float = 0.7,
     max_tokens: int = 4096,
     max_retries: int = 3,
-    on_tool_call: callable | None = None,
+    on_tool_call: Optional[Callable] = None,
 ) -> str:
     """
     Run an agentic react loop with tool calling.
