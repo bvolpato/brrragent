@@ -6,6 +6,8 @@ Provides:
   - run_agent: Smart-routed agentic loop (auto-selects Gemini direct vs OpenRouter)
   - get_default_caller: Singleton McpToolCaller instance
   - pick_key / pick_env_key: Handle comma-separated API keys
+  - KeyPool: Thread-safe key pool with 429 eviction (works for any provider)
+  - RateLimitExhausted: Exception when all keys are rate-limited
 
 Backends (importable individually):
   - brrragent.openrouter: OpenRouter/OpenAI-compatible backend
@@ -15,7 +17,7 @@ Backends (importable individually):
 
 from brrragent.mcp_tools import McpToolCaller, get_default_caller
 from brrragent.agent import run_agent
-from brrragent.keys import pick_key, pick_env_key
+from brrragent.keys import pick_key, pick_env_key, KeyPool, RateLimitExhausted
 
 __all__ = [
     "McpToolCaller",
@@ -23,4 +25,6 @@ __all__ = [
     "run_agent",
     "pick_key",
     "pick_env_key",
+    "KeyPool",
+    "RateLimitExhausted",
 ]

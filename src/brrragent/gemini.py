@@ -3,13 +3,24 @@ Google Gemini direct backend for the agent loop.
 
 Uses the google-genai SDK to call Gemini models directly without going
 through OpenRouter — no premium, same functionality.
+
+Supports KeyPool-based 429 eviction: when a key hits rate limits, the
+pool evicts it and the agent retries with a fresh key.
 """
 
 import logging
 import time
 from typing import Callable, Optional
 
+from brrragent.keys import KeyPool, RateLimitExhausted
+
 logger = logging.getLogger(__name__)
+
+
+def _is_rate_limit_error(err: Exception) -> bool:
+    """Check if an error is a 429 / quota / rate-limit error."""
+    err_str = str(err)
+    return any(p in err_str for p in ("429", "RESOURCE_EXHAUSTED", "quota", "rate"))
 
 
 def run_gemini_agent(
@@ -17,7 +28,8 @@ def run_gemini_agent(
     system_prompt: str,
     user_prompt: str,
     model: str,
-    api_key: str,
+    api_key: str | None = None,
+    key_pool: KeyPool | None = None,
     mcp,
     max_turns: int,
     temperature: float,
@@ -26,14 +38,23 @@ def run_gemini_agent(
     on_tool_call: Optional[Callable],
     response_schema: dict | None,
 ) -> str:
-    """Run the agent using the Google genai SDK directly (no OpenRouter)."""
+    """Run the agent using the Google genai SDK directly (no OpenRouter).
+
+    Key selection priority:
+      1. key_pool — acquires from pool, evicts on 429, retries with fresh key
+      2. api_key — single explicit key (legacy)
+    """
     try:
         from google import genai
         from google.genai import types as gt
     except ImportError as e:
         raise ImportError("google-genai required for Gemini direct: pip install google-genai") from e
 
-    client = genai.Client(api_key=api_key)
+    if key_pool is None and api_key is None:
+        raise ValueError("Either api_key or key_pool must be provided")
+
+    selected_key = api_key or key_pool.acquire()
+    client = genai.Client(api_key=selected_key)
     tools = mcp.get_genai_tools()
 
     contents: list[gt.Content] = [
@@ -62,7 +83,16 @@ def run_gemini_agent(
             contents=contents,
             config=config,
             max_retries=max_retries,
+            key_pool=key_pool,
+            current_key=selected_key,
         )
+
+        # If we got back a new key (pool rotation happened), rebuild the client
+        if isinstance(response, tuple):
+            response, new_key = response
+            if new_key != selected_key:
+                selected_key = new_key
+                client = genai.Client(api_key=selected_key)
 
         candidate = response.candidates[0] if response.candidates else None
         if not candidate:
@@ -112,20 +142,48 @@ def _call_with_retry(
     contents,
     config,
     max_retries: int,
+    key_pool: KeyPool | None = None,
+    current_key: str = "",
 ):
-    """Call the Gemini API with exponential backoff on transient errors."""
+    """Call the Gemini API with exponential backoff on transient errors.
+
+    On 429 errors with a key_pool:
+      - Evicts the current key from the pool
+      - Acquires a fresh key and rebuilds the client
+      - Returns (response, new_key) tuple so caller can track the key change
+
+    Without a key_pool, 429s are retried with backoff like any transient error.
+    """
     last_err = None
 
     for attempt in range(1, max_retries + 1):
         try:
-            return client.models.generate_content(
+            resp = client.models.generate_content(
                 model=model,
                 contents=contents,
                 config=config,
             )
+            if key_pool:
+                return (resp, current_key)
+            return resp
         except Exception as e:
             last_err = e
             err_str = str(e)
+
+            if _is_rate_limit_error(e) and key_pool:
+                logger.warning(
+                    "[agent] Gemini 429 on key ...%s (attempt %d/%d): %s",
+                    current_key[-6:], attempt, max_retries, err_str[:200],
+                )
+                # Evict and get a new key — may raise RateLimitExhausted
+                key_pool.report_rate_limit(current_key)
+                current_key = key_pool.acquire()
+
+                from google import genai
+                client = genai.Client(api_key=current_key)
+                logger.info("[agent] Rotated to key ...%s, retrying immediately", current_key[-6:])
+                continue
+
             is_transient = any(
                 p in err_str
                 for p in ("500", "503", "429", "UNAVAILABLE", "INTERNAL", "overloaded", "rate")
