@@ -15,8 +15,32 @@ from typing import Any, ClassVar
 
 logger = logging.getLogger(__name__)
 
-# Default set of tools to expose (can be overridden)
-DEFAULT_RESEARCH_TOOLS = {"web_search", "news_search", "read_url", "youtube_search"}
+# Default set of tools to expose (can be overridden via allowed_tools param)
+DEFAULT_RESEARCH_TOOLS = {
+    "web_search",
+    "news_search",
+    "read_url",
+    "summarize_url",
+    "arena_leaderboard",
+    "fetch_stock_quote",
+    "fetch_crypto_quote",
+    "fetch_crypto_candles",
+    "fetch_weather",
+    "sql_query",
+    "fred_search",
+    "fred_series",
+    "geocode",
+    "youtube_search",
+    "youtube_video",
+    "youtube_transcript",
+    "analyze_image",
+    "gemini_search",
+    "upload_file",
+    "reddit_search",
+    "x_search",
+    "x_post_count",
+    "x_user_posts",
+}
 
 
 class McpToolCaller:
