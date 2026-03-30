@@ -76,7 +76,7 @@ result = run_agent(
 |---|---|---|
 | `OPENROUTER_API_KEY` | One of these | OpenRouter API key(s), comma-separated |
 | `GEMINI_API_KEY` | One of these | Google Gemini API key(s), comma-separated |
-| `MCP_CRAWLERS_URL` | No | MCP endpoint (defaults to `https://crawlers.brunocvcunha.workers.dev/mcp`) |
+| `MCP_CRAWLERPY_URL` | No | MCP endpoint (defaults to `https://crawlerpy.brunovolpato.com/mcp`) |
 
 ### Comma-Separated Keys
 

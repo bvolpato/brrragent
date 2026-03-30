@@ -34,8 +34,8 @@ class McpToolCaller:
         max_response_len: int = 15_000,
     ):
         self.endpoint = endpoint or os.getenv(
-            "MCP_CRAWLERS_URL",
-            "https://crawlers.brunocvcunha.workers.dev/mcp",
+            "MCP_CRAWLERPY_URL",
+            "https://crawlerpy.brunovolpato.com/mcp",
         )
         self.allowed_tools = allowed_tools or DEFAULT_RESEARCH_TOOLS
         self.max_response_len = max_response_len
