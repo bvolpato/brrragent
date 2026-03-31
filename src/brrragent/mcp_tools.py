@@ -35,6 +35,7 @@ DEFAULT_RESEARCH_TOOLS = {
     "youtube_transcript",
     "analyze_image",
     "gemini_search",
+    "nanobanana",
     "upload_file",
     "reddit_search",
     "x_search",
