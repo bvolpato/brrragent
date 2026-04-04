@@ -1,11 +1,13 @@
 """
 Agentic React Loop — Smart Router.
 
-Automatically chooses between Google Gemini direct and OpenRouter based on
-the model name and available API keys.
+Automatically chooses between Google Gemini direct, native provider APIs,
+and OpenRouter based on the model name and available API keys.
 
 Routing logic:
   - model starts with "google/" or "gemini-" + Gemini keys available → Gemini direct
+  - model starts with "fireworks/" + FIREWORKS_API_KEY → Fireworks native
+  - model starts with "minimax/" + MINIMAX_API_KEY → MiniMax native
   - Otherwise → OpenRouter with OPENROUTER_API_KEY
 
 Supports KeyPool for both backends: keys are acquired per-call and evicted
@@ -38,6 +40,14 @@ logger = logging.getLogger(__name__)
 
 MAX_TOOL_TURNS = 12
 
+# Native provider registry: prefix → (base_url, env_var_name)
+# Models with these prefixes are routed directly to the provider's
+# OpenAI-compatible API instead of going through OpenRouter.
+NATIVE_PROVIDERS: dict[str, tuple[str, str]] = {
+    "fireworks/": ("https://api.fireworks.ai/inference/v1", "FIREWORKS_API_KEY"),
+    "minimax/":   ("https://api.minimax.io/v1",              "MINIMAX_API_KEY"),
+}
+
 
 def _is_google_model(model: str) -> bool:
     """Check if a model identifier is a Google model."""
@@ -49,6 +59,30 @@ def _get_gemini_model_name(model: str) -> str:
     if model.startswith("google/"):
         return model[len("google/"):]
     return model
+
+
+def _resolve_native_provider(model: str) -> tuple[str, str, str, str] | None:
+    """Check if the model matches a native provider prefix.
+
+    Returns (base_url, api_key, provider_name, bare_model) if a native route
+    is available, or None to fall through to OpenRouter.
+
+    The bare_model has the provider prefix stripped — native APIs expect the
+    model ID without it (e.g. "accounts/fireworks/routers/kimi-k2p5-turbo"
+    not "fireworks/accounts/fireworks/routers/kimi-k2p5-turbo").
+    """
+    for prefix, (base_url, env_var) in NATIVE_PROVIDERS.items():
+        if model.startswith(prefix):
+            api_key = os.environ.get(env_var, "").strip()
+            if api_key:
+                provider_name = prefix.rstrip("/")
+                bare_model = model[len(prefix):]
+                return base_url, api_key, provider_name, bare_model
+            logger.debug(
+                "[agent] Model %s matches %s but %s is not set — falling through to OpenRouter",
+                model, prefix, env_var,
+            )
+    return None
 
 
 def run_agent(
@@ -74,6 +108,8 @@ def run_agent(
 
     Smart routing:
       - If model starts with "google/" and Gemini keys are available → Gemini direct
+      - If model starts with a native provider prefix (fireworks/, minimax/) and
+        the corresponding env var is set → provider's native API
       - Otherwise → OpenRouter with OPENROUTER_API_KEY
 
     Key pools (preferred) or env vars can provide the keys.
@@ -144,27 +180,22 @@ def run_agent(
             on_tool_call=on_tool_call,
             response_schema=response_schema,
         )
-    else:
+
+    # Check for native provider routing (fireworks/, minimax/, etc.)
+    native = _resolve_native_provider(model) if api_key is None else None
+
+    if native is not None:
         from brrragent.openrouter import run_openrouter_agent
 
-        # Determine key source for OpenRouter
-        effective_key = api_key
-        effective_pool = None if api_key else openrouter_key_pool
-
-        if effective_key is None and effective_pool is None:
-            raise ValueError("No API key: set GEMINI_API_KEY or OPENROUTER_API_KEY, or provide a key pool")
-
-        logger.info(
-            "[agent] Using OpenRouter (model=%s, pool=%s)",
-            model, effective_pool.status() if effective_pool else "explicit-key",
-        )
+        native_base_url, native_api_key, provider_name, bare_model = native
+        logger.info("[agent] Using %s native (model=%s)", provider_name, bare_model)
         return run_openrouter_agent(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
-            model=model,
-            api_key=effective_key,
-            key_pool=effective_pool,
-            base_url=base_url,
+            model=bare_model,
+            api_key=native_api_key,
+            key_pool=None,
+            base_url=native_base_url,
             mcp=mcp,
             extra_tools=extra_tools,
             max_turns=max_turns,
@@ -174,3 +205,33 @@ def run_agent(
             on_tool_call=on_tool_call,
             response_schema=response_schema,
         )
+
+    # Fallback: OpenRouter
+    from brrragent.openrouter import run_openrouter_agent
+
+    effective_key = api_key
+    effective_pool = None if api_key else openrouter_key_pool
+
+    if effective_key is None and effective_pool is None:
+        raise ValueError("No API key: set GEMINI_API_KEY or OPENROUTER_API_KEY, or provide a key pool")
+
+    logger.info(
+        "[agent] Using OpenRouter (model=%s, pool=%s)",
+        model, effective_pool.status() if effective_pool else "explicit-key",
+    )
+    return run_openrouter_agent(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        model=model,
+        api_key=effective_key,
+        key_pool=effective_pool,
+        base_url=base_url,
+        mcp=mcp,
+        extra_tools=extra_tools,
+        max_turns=max_turns,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        max_retries=max_retries,
+        on_tool_call=on_tool_call,
+        response_schema=response_schema,
+    )

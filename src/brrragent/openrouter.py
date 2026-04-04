@@ -79,7 +79,7 @@ def run_openrouter_agent(
         }
 
     for turn in range(max_turns):
-        logger.info("[agent] Turn %d/%d — calling %s (openrouter)", turn + 1, max_turns, model)
+        logger.info("[agent] Turn %d/%d — calling %s (%s)", turn + 1, max_turns, model, base_url)
 
         result = _call_with_retry(
             client=client,
