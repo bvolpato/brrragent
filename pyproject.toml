@@ -10,8 +10,8 @@ dependencies = [
 [project.optional-dependencies]
 gemini = ["google-genai>=1.0.0"]
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "pytest>=8.0.0",
 ]
 
