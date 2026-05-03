@@ -8,7 +8,7 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: arc-self-hosted
     strategy:
       fail-fast: false
       matrix:
@@ -20,14 +20,19 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
+      - name: Restore uv cache
+        run: gcs-cache restore uv "${{ runner.os }}-uv-${{ matrix.python-version }}-${{ hashFiles('uv.lock') }}" "$HOME/.cache/uv" "$HOME/.local/share/uv"
+
 
       - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --all-extras --dev
+        run: uv sync --all-extras --dev --python ${{ matrix.python-version }}
+
+      - name: Save uv cache
+        if: always()
+        run: gcs-cache save uv "${{ runner.os }}-uv-${{ matrix.python-version }}-${{ hashFiles('uv.lock') }}" "$HOME/.cache/uv" "$HOME/.local/share/uv"
 
       - name: Run tests
         run: uv run pytest
