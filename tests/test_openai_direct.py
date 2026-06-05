@@ -1,4 +1,10 @@
-from brrragent.openai_direct import _build_chat_kwargs, parse_openai_model
+from brrragent.openai_direct import (
+    _build_chat_kwargs,
+    _build_responses_kwargs,
+    _should_use_responses,
+    _to_responses_tool,
+    parse_openai_model,
+)
 
 
 def test_parse_openai_model_strips_prefix_and_reasoning_suffix():
@@ -41,3 +47,53 @@ def test_build_chat_kwargs_uses_classic_fields_for_non_reasoning_model():
     assert kwargs["response_format"] == {"type": "json_object"}
     assert "max_completion_tokens" not in kwargs
     assert "reasoning_effort" not in kwargs
+
+
+def test_reasoning_model_with_tools_uses_responses_path():
+    assert _should_use_responses(
+        "openai/gpt-5.5:xhigh",
+        [{"type": "function", "function": {"name": "search"}}],
+        None,
+    )
+    assert not _should_use_responses("openai/gpt-5.5:xhigh", [], None)
+
+
+def test_to_responses_tool_flattens_openai_function_tool():
+    tool = _to_responses_tool(
+        {
+            "type": "function",
+            "function": {
+                "name": "search",
+                "description": "Search",
+                "parameters": {"type": "object", "properties": {"q": {"type": "string"}}},
+            },
+        }
+    )
+
+    assert tool == {
+        "type": "function",
+        "name": "search",
+        "description": "Search",
+        "parameters": {"type": "object", "properties": {"q": {"type": "string"}}},
+        "strict": False,
+    }
+
+
+def test_build_responses_kwargs_uses_reasoning_and_text_schema():
+    kwargs = _build_responses_kwargs(
+        model="openai/gpt-5.5:xhigh",
+        input_items=[{"role": "user", "content": "hi"}],
+        instructions="system",
+        tools=[{"type": "function", "function": {"name": "search"}}],
+        temperature=0.4,
+        max_tokens=32000,
+        response_schema={"type": "object", "properties": {}, "additionalProperties": False},
+    )
+
+    assert kwargs["model"] == "gpt-5.5"
+    assert kwargs["instructions"] == "system"
+    assert kwargs["max_output_tokens"] == 32000
+    assert kwargs["reasoning"] == {"effort": "xhigh"}
+    assert kwargs["tools"][0]["name"] == "search"
+    assert kwargs["text"]["format"]["type"] == "json_schema"
+    assert "temperature" not in kwargs
