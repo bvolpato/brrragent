@@ -1,20 +1,20 @@
 # brrragent
 
-Reusable agentic react loop with MCP tool calling. Supports **OpenRouter** and **Google Gemini direct** backends with automatic smart routing.
+Reusable agentic react loop with MCP tool calling. Supports **OpenRouter**, **OpenAI direct**, and **Google Gemini direct** backends with automatic smart routing.
 
 ## Features
 
 - **Smart routing** — automatically picks the cheapest/best backend based on model name and available API keys
 - **Comma-separated API keys** — spread load across multiple keys for rate-limit resilience and caching
 - **MCP tool calling** — bridges any MCP JSON-RPC endpoint into LLM function-calling (both OpenAI and Gemini formats)
-- **Structured output** — JSON schema enforcement on both OpenRouter (`response_format`) and Gemini (`response_schema`)
+- **Structured output** — JSON schema enforcement on OpenRouter/OpenAI (`response_format`) and Gemini (`response_schema`)
 - **Retry with backoff** — exponential backoff on transient errors (429, 503, etc.)
 - **Minimal dependencies** — only `openai` is required; `google-genai` is optional
 
 ## Installation
 
 ```bash
-# OpenRouter only
+# OpenRouter / OpenAI only
 uv pip install /path/to/brrragent
 
 # With Gemini direct support
@@ -43,20 +43,22 @@ print(result)
 
 That's it. The agent will:
 1. Detect `google/` prefix → check if `GEMINI_API_KEY` is set → use Gemini direct (no OpenRouter premium)
-2. Fall back to OpenRouter if `GEMINI_API_KEY` is missing
-3. Pick a random key if the env var contains comma-separated keys
+2. Detect `openai/` prefix → check if an OpenAI key is set → use OpenAI direct with reasoning suffix support
+3. Fall back to OpenRouter if direct-provider keys are missing
+4. Pick a random key if the env var contains comma-separated keys
 4. Use MCP tools (web search, news, etc.) to research and answer
 
 ## Smart Routing
 
 The routing decision is automatic based on model name and available environment variables:
 
-| Model | `GEMINI_API_KEY` set? | Backend used |
+| Model | Direct-provider key set? | Backend used |
 |---|---|---|
 | `google/gemini-3.1-pro-preview` | ✅ | **Gemini direct** (free, no OpenRouter premium) |
 | `google/gemini-3.1-pro-preview` | ❌ | **OpenRouter** (uses `OPENROUTER_API_KEY`) |
+| `openai/gpt-5.5:xhigh` | ✅ | **OpenAI direct** (uses `OPENAI_API_KEY_PERSONAL`, `OPENAI_API_KEY`, or `OPENAI_API_KEY_CORP`) |
+| `openai/gpt-5.5:xhigh` | ❌ | **OpenRouter** (uses `OPENROUTER_API_KEY`) |
 | `anthropic/claude-4.6-sonnet` | — | **OpenRouter** (always) |
-| `openai/gpt-5.4` | — | **OpenRouter** (always) |
 
 You can override routing by passing `api_key` explicitly:
 ```python
@@ -75,15 +77,19 @@ result = run_agent(
 | Variable | Required | Description |
 |---|---|---|
 | `OPENROUTER_API_KEY` | One of these | OpenRouter API key(s), comma-separated |
+| `OPENAI_API_KEY_PERSONAL` | One of these | Preferred direct OpenAI API key(s), comma-separated |
+| `OPENAI_API_KEY` | One of these | Direct OpenAI API key(s), comma-separated |
+| `OPENAI_API_KEY_CORP` | One of these | Fallback direct OpenAI API key(s), comma-separated |
 | `GEMINI_API_KEY` | One of these | Google Gemini API key(s), comma-separated |
 | `MCP_CRAWLERPY_URL` | No | MCP endpoint (defaults to `https://crawlerpy.brunovolpato.com/mcp`) |
 
 ### Comma-Separated Keys
 
-Both `OPENROUTER_API_KEY` and `GEMINI_API_KEY` support multiple keys separated by commas. One key is picked at random per `run_agent` call to spread load and improve rate-limit resilience:
+`OPENROUTER_API_KEY`, OpenAI key vars, and `GEMINI_API_KEY` support multiple keys separated by commas. One key is picked at random per `run_agent` call to spread load and improve rate-limit resilience:
 
 ```bash
 OPENROUTER_API_KEY=sk-or-v1-key1,sk-or-v1-key2,sk-or-v1-key3
+OPENAI_API_KEY_PERSONAL=sk-key1,sk-key2
 GEMINI_API_KEY=AIzaSy-key1,AIzaSy-key2
 ```
 

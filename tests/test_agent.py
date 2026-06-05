@@ -13,6 +13,8 @@ def test_google_model_helpers():
     assert agent._is_google_model("google/gemini-3.1-pro-preview")
     assert agent._is_google_model("gemini-3.1-pro-preview")
     assert not agent._is_google_model("openai/gpt-5.4")
+    assert agent._is_openai_model("openai/gpt-5.4")
+    assert not agent._is_openai_model("google/gemini-3.1-pro-preview")
     assert agent._get_gemini_model_name("google/gemini-3.1-pro-preview") == "gemini-3.1-pro-preview"
     assert agent._get_gemini_model_name("gemini-3.1-pro-preview") == "gemini-3.1-pro-preview"
 
@@ -78,8 +80,33 @@ def test_run_agent_routes_gemini_key_pool(monkeypatch):
     assert calls[0]["key_pool"] is pool
 
 
+def test_run_agent_routes_openai_direct_from_env(monkeypatch):
+    calls = []
+
+    def fake_openai_agent(**kwargs):
+        calls.append(kwargs)
+        return "ok"
+
+    monkeypatch.setenv("OPENAI_API_KEY_PERSONAL", "openai-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-key")
+    monkeypatch.setattr("brrragent.openai_direct.run_openai_agent", fake_openai_agent)
+
+    assert agent.run_agent(
+        system_prompt="system",
+        user_prompt="user",
+        model="openai/gpt-5.5:xhigh",
+        mcp=DummyMcp(),
+    ) == "ok"
+
+    assert calls[0]["model"] == "openai/gpt-5.5:xhigh"
+    assert calls[0]["key_pool"].acquire() == "openai-key"
+
+
 def test_run_agent_requires_api_key_when_no_pool(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY_PERSONAL", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY_CORP", raising=False)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
 
     with pytest.raises(ValueError, match="No API key"):

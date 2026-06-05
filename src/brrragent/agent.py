@@ -1,13 +1,14 @@
 """
 Agentic React Loop — Smart Router.
 
-Automatically chooses between Google Gemini direct, native provider APIs,
-and OpenRouter based on the model name and available API keys.
+Automatically chooses between Google Gemini direct, OpenAI direct,
+native provider APIs, and OpenRouter based on the model name and available keys.
 
 Routing logic:
   - model starts with "google/" or "gemini-" + Gemini keys available → Gemini direct
   - model starts with "fireworks/" + FIREWORKS_API_KEY → Fireworks native
   - model starts with "minimax/" + MINIMAX_API_KEY → MiniMax native
+  - model starts with "openai/" + OpenAI keys available → OpenAI direct
   - Otherwise → OpenRouter with OPENROUTER_API_KEY
 
 Supports KeyPool for both backends: keys are acquired per-call and evicted
@@ -54,6 +55,11 @@ def _is_google_model(model: str) -> bool:
     return model.startswith("google/") or model.startswith("gemini-")
 
 
+def _is_openai_model(model: str) -> bool:
+    """Check if a model identifier should use OpenAI direct when keys exist."""
+    return model.startswith("openai/")
+
+
 def _get_gemini_model_name(model: str) -> str:
     """Strip 'google/' prefix to get the bare Gemini model name."""
     if model.startswith("google/"):
@@ -85,6 +91,19 @@ def _resolve_native_provider(model: str) -> tuple[str, str, str, str] | None:
     return None
 
 
+def _keys_from_envs(*env_names: str) -> list[str]:
+    keys: list[str] = []
+    seen: set[str] = set()
+    for env_name in env_names:
+        raw = os.environ.get(env_name, "")
+        for key in raw.split(","):
+            key = key.strip()
+            if key and key not in seen:
+                keys.append(key)
+                seen.add(key)
+    return keys
+
+
 def run_agent(
     *,
     system_prompt: str,
@@ -92,6 +111,7 @@ def run_agent(
     model: str = "google/gemini-3.1-pro-preview",
     api_key: str | None = None,
     gemini_key_pool: KeyPool | None = None,
+    openai_key_pool: KeyPool | None = None,
     openrouter_key_pool: KeyPool | None = None,
     base_url: str = "https://openrouter.ai/api/v1",
     mcp: McpToolCaller | None = None,
@@ -108,6 +128,7 @@ def run_agent(
 
     Smart routing:
       - If model starts with "google/" and Gemini keys are available → Gemini direct
+      - If model starts with "openai/" and OpenAI keys are available → OpenAI direct
       - If model starts with a native provider prefix (fireworks/, minimax/) and
         the corresponding env var is set → provider's native API
       - Otherwise → OpenRouter with OPENROUTER_API_KEY
@@ -122,6 +143,7 @@ def run_agent(
         model: Model identifier (e.g. "google/gemini-3.1-pro-preview").
         api_key: Override API key (skips smart routing, legacy).
         gemini_key_pool: KeyPool for Gemini keys (preferred over env var).
+        openai_key_pool: KeyPool for direct OpenAI keys (preferred over env var).
         openrouter_key_pool: KeyPool for OpenRouter keys (preferred over env var).
         base_url: API base URL (only used for OpenRouter path).
         mcp: McpToolCaller instance. Defaults to the shared singleton.
@@ -155,10 +177,24 @@ def run_agent(
         if or_csv.strip():
             openrouter_key_pool = KeyPool.from_csv(or_csv, name="openrouter")
 
+    if openai_key_pool is None:
+        openai_keys = _keys_from_envs(
+            "OPENAI_API_KEY_PERSONAL",
+            "OPENAI_API_KEY",
+            "OPENAI_API_KEY_CORP",
+        )
+        if openai_keys:
+            openai_key_pool = KeyPool(openai_keys, name="openai")
+
     # Smart routing: decide which backend to use
     use_gemini_direct = (
         _is_google_model(model)
         and gemini_key_pool is not None
+        and api_key is None
+    )
+    use_openai_direct = (
+        _is_openai_model(model)
+        and openai_key_pool is not None
         and api_key is None
     )
 
@@ -173,6 +209,25 @@ def run_agent(
             model=bare_model,
             key_pool=gemini_key_pool,
             mcp=mcp,
+            max_turns=max_turns,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            max_retries=max_retries,
+            on_tool_call=on_tool_call,
+            response_schema=response_schema,
+        )
+
+    if use_openai_direct:
+        from brrragent.openai_direct import run_openai_agent
+
+        logger.info("[agent] Using OpenAI direct (model=%s, pool=%s)", model, openai_key_pool.status())
+        return run_openai_agent(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            model=model,
+            key_pool=openai_key_pool,
+            mcp=mcp,
+            extra_tools=extra_tools,
             max_turns=max_turns,
             temperature=temperature,
             max_tokens=max_tokens,
