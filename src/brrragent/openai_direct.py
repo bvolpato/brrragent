@@ -375,8 +375,31 @@ def _run_openai_responses_agent(
                 }
             )
 
-    logger.warning("[agent] Reached max_turns=%d without final response", max_turns)
-    return "[No final response after max tool turns]"
+    logger.warning("[agent] Reached max_turns=%d without final response; requesting final answer without tools", max_turns)
+    result = _call_responses_with_retry(
+        client=client,
+        model=model,
+        input_items=[
+            *input_items,
+            {
+                "role": "user",
+                "content": "Stop calling tools. Provide the final answer using the evidence already gathered.",
+            }
+        ],
+        instructions=system_prompt,
+        tools=[],
+        temperature=temperature,
+        max_tokens=max_tokens,
+        max_retries=max_retries,
+        response_schema=response_schema,
+        previous_response_id=previous_response_id,
+        key_pool=key_pool,
+        current_key=selected_key,
+    )
+    response = result[0] if isinstance(result, tuple) else result
+    final_text = _response_final_text(response)
+    logger.info("[agent] Final no-tool response after max_turns (%d chars)", len(final_text))
+    return final_text or "[No final response after max tool turns]"
 
 
 def _call_with_retry(
