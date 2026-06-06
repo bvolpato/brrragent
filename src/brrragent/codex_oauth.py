@@ -10,6 +10,7 @@ This backend mirrors OpenCode's OpenAI provider behavior:
 from __future__ import annotations
 
 import base64
+import fcntl
 import json
 import logging
 import os
@@ -40,9 +41,33 @@ def _auth_path() -> Path:
     return Path(os.getenv("BRRRAGENT_OPENCODE_AUTH_PATH", DEFAULT_AUTH_PATH)).expanduser()
 
 
+def _auth_lock_path(path: Path) -> Path:
+    return path.with_name(f"{path.name}.brrragent.lock")
+
+
+def _read_auth_file(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text())
+    except FileNotFoundError as exc:
+        raise ValueError(f"OpenCode auth file not found: {path}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"OpenCode auth file is invalid JSON: {path}") from exc
+
+
+def _write_auth_file(path: Path, auth: dict) -> None:
+    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp_path.write_text(json.dumps(auth, indent=2), encoding="utf-8")
+    try:
+        mode = path.stat().st_mode & 0o777
+    except FileNotFoundError:
+        mode = 0o600
+    tmp_path.chmod(mode)
+    os.replace(tmp_path, path)
+
+
 def has_opencode_oauth() -> bool:
     try:
-        auth = json.loads(_auth_path().read_text())
+        auth = _read_auth_file(_auth_path())
     except Exception:
         return False
     openai = auth.get("openai") or {}
@@ -58,22 +83,25 @@ def _decode_jwt_payload(token: str) -> dict:
         return {}
 
 
-def _read_opencode_auth() -> dict:
-    path = _auth_path()
-    try:
-        auth = json.loads(path.read_text())
-    except FileNotFoundError as exc:
-        raise ValueError(f"OpenCode auth file not found: {path}") from exc
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"OpenCode auth file is invalid JSON: {path}") from exc
-
+def _validate_openai_auth(auth: dict, path: Path) -> dict:
     openai = auth.get("openai") or {}
     if openai.get("type") != "oauth" or not openai.get("refresh"):
         raise ValueError(f"OpenCode OpenAI OAuth token not found in {path}")
     return openai
 
 
-def _refresh_access_token(openai_auth: dict) -> tuple[str, str | None]:
+def _valid_stored_access(openai_auth: dict) -> tuple[str, str | None] | None:
+    access_token = openai_auth.get("access")
+    try:
+        expires_ms = int(openai_auth.get("expires") or 0)
+    except (TypeError, ValueError):
+        expires_ms = 0
+    if access_token and expires_ms > int(time.time() * 1000) + 120_000:
+        return access_token, openai_auth.get("accountId")
+    return None
+
+
+def _refresh_access_token(openai_auth: dict) -> tuple[dict, str, str | None]:
     body = parse.urlencode(
         {
             "grant_type": "refresh_token",
@@ -100,12 +128,42 @@ def _refresh_access_token(openai_auth: dict) -> tuple[str, str | None]:
     if not access_token:
         raise ValueError("Codex OAuth refresh returned no access_token")
 
+    try:
+        expires_ms = int(time.time() * 1000) + int(payload.get("expires_in") or 0) * 1000
+    except (TypeError, ValueError):
+        expires_ms = int(time.time() * 1000) + 600_000
     claims = _decode_jwt_payload(access_token)
     account_id = (
         openai_auth.get("accountId")
         or (claims.get("https://api.openai.com/auth") or {}).get("chatgpt_account_id")
     )
-    return access_token, account_id
+    refreshed_auth = {
+        **openai_auth,
+        "access": access_token,
+        "refresh": payload.get("refresh_token") or openai_auth["refresh"],
+        "expires": expires_ms,
+    }
+    if account_id:
+        refreshed_auth["accountId"] = account_id
+    return refreshed_auth, access_token, account_id
+
+
+def _get_codex_access_token() -> tuple[str, str | None]:
+    path = _auth_path()
+    lock_path = _auth_lock_path(path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("w", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        auth = _read_auth_file(path)
+        openai_auth = _validate_openai_auth(auth, path)
+        stored = _valid_stored_access(openai_auth)
+        if stored:
+            return stored
+
+        refreshed_auth, access_token, account_id = _refresh_access_token(openai_auth)
+        auth["openai"] = refreshed_auth
+        _write_auth_file(path, auth)
+        return access_token, account_id
 
 
 def _codex_headers(access_token: str, account_id: str | None) -> dict[str, str]:
@@ -257,8 +315,7 @@ def run_codex_oauth_agent(
     """Run the agent against ChatGPT/Codex Responses using OpenCode OAuth."""
     del temperature, max_tokens
 
-    openai_auth = _read_opencode_auth()
-    access_token, account_id = _refresh_access_token(openai_auth)
+    access_token, account_id = _get_codex_access_token()
     headers = _codex_headers(access_token, account_id)
 
     tools = mcp.get_openai_tools()

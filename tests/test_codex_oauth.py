@@ -4,6 +4,7 @@ from brrragent.codex_oauth import (
     _build_payload,
     _extract_function_calls,
     _extract_response_text,
+    _get_codex_access_token,
     has_opencode_oauth,
     parse_codex_model,
 )
@@ -72,3 +73,79 @@ def test_has_opencode_oauth_reads_configured_path(tmp_path, monkeypatch):
     monkeypatch.setenv("BRRRAGENT_OPENCODE_AUTH_PATH", str(auth_path))
 
     assert has_opencode_oauth()
+
+
+def test_get_codex_access_token_reuses_valid_access(tmp_path, monkeypatch):
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(
+        json.dumps(
+            {
+                "openai": {
+                    "type": "oauth",
+                    "refresh": "rt_old",
+                    "access": "access_valid",
+                    "expires": 4_102_444_800_000,
+                    "accountId": "acct_1",
+                }
+            }
+        )
+    )
+    monkeypatch.setenv("BRRRAGENT_OPENCODE_AUTH_PATH", str(auth_path))
+
+    def fail_refresh(*args, **kwargs):
+        raise AssertionError("refresh should not be called")
+
+    monkeypatch.setattr("brrragent.codex_oauth.request.urlopen", fail_refresh)
+
+    assert _get_codex_access_token() == ("access_valid", "acct_1")
+
+
+def test_get_codex_access_token_persists_rotated_refresh(tmp_path, monkeypatch):
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(
+        json.dumps(
+            {
+                "openai": {
+                    "type": "oauth",
+                    "refresh": "rt_old",
+                    "access": "access_old",
+                    "expires": 1,
+                    "accountId": "acct_1",
+                }
+            }
+        )
+    )
+    monkeypatch.setenv("BRRRAGENT_OPENCODE_AUTH_PATH", str(auth_path))
+
+    calls = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "access_token": "access_new",
+                    "refresh_token": "rt_new",
+                    "expires_in": 3600,
+                }
+            ).encode()
+
+    def fake_urlopen(req, timeout):
+        calls.append((req, timeout))
+        return Response()
+
+    monkeypatch.setattr("brrragent.codex_oauth.request.urlopen", fake_urlopen)
+
+    assert _get_codex_access_token() == ("access_new", "acct_1")
+    assert _get_codex_access_token() == ("access_new", "acct_1")
+    assert len(calls) == 1
+
+    saved = json.loads(auth_path.read_text())
+    assert saved["openai"]["access"] == "access_new"
+    assert saved["openai"]["refresh"] == "rt_new"
+    assert saved["openai"]["expires"] > 1
