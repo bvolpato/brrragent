@@ -2,12 +2,15 @@
 Agentic React Loop — Smart Router.
 
 Automatically chooses between Google Gemini direct, OpenAI direct,
-native provider APIs, and OpenRouter based on the model name and available keys.
+Codex OAuth, native provider APIs, and OpenRouter based on the model name and
+available keys.
 
 Routing logic:
   - model starts with "google/" or "gemini-" + Gemini keys available → Gemini direct
   - model starts with "fireworks/" + FIREWORKS_API_KEY → Fireworks native
   - model starts with "minimax/" + MINIMAX_API_KEY → MiniMax native
+  - model starts with "codex/" → Codex OAuth
+  - model starts with "openai/" + BRRRAGENT_OPENAI_BACKEND=codex_oauth → Codex OAuth
   - model starts with "openai/" + OpenAI keys available → OpenAI direct
   - Otherwise → OpenRouter with OPENROUTER_API_KEY
 
@@ -58,6 +61,22 @@ def _is_google_model(model: str) -> bool:
 def _is_openai_model(model: str) -> bool:
     """Check if a model identifier should use OpenAI direct when keys exist."""
     return model.startswith("openai/")
+
+
+def _is_codex_model(model: str) -> bool:
+    return model.startswith("codex/")
+
+
+def _use_codex_oauth_backend(model: str, api_key: str | None) -> bool:
+    if api_key is not None:
+        return False
+    if _is_codex_model(model):
+        return True
+    if not _is_openai_model(model):
+        return False
+    backend = os.environ.get("BRRRAGENT_OPENAI_BACKEND", "").strip().lower()
+    enabled = os.environ.get("BRRRAGENT_CODEX_OAUTH", "").strip().lower()
+    return backend in {"codex", "codex_oauth"} or enabled in {"1", "true", "yes", "on"}
 
 
 def _get_gemini_model_name(model: str) -> str:
@@ -128,6 +147,8 @@ def run_agent(
 
     Smart routing:
       - If model starts with "google/" and Gemini keys are available → Gemini direct
+      - If model starts with "codex/" → Codex OAuth
+      - If model starts with "openai/" and BRRRAGENT_OPENAI_BACKEND=codex_oauth → Codex OAuth
       - If model starts with "openai/" and OpenAI keys are available → OpenAI direct
       - If model starts with a native provider prefix (fireworks/, minimax/) and
         the corresponding env var is set → provider's native API
@@ -197,6 +218,7 @@ def run_agent(
         and openai_key_pool is not None
         and api_key is None
     )
+    use_codex_oauth = _use_codex_oauth_backend(model, api_key)
 
     if use_gemini_direct:
         from brrragent.gemini import run_gemini_agent
@@ -209,6 +231,24 @@ def run_agent(
             model=bare_model,
             key_pool=gemini_key_pool,
             mcp=mcp,
+            max_turns=max_turns,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            max_retries=max_retries,
+            on_tool_call=on_tool_call,
+            response_schema=response_schema,
+        )
+
+    if use_codex_oauth:
+        from brrragent.codex_oauth import run_codex_oauth_agent
+
+        logger.info("[agent] Using Codex OAuth (model=%s)", model)
+        return run_codex_oauth_agent(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            model=model,
+            mcp=mcp,
+            extra_tools=extra_tools,
             max_turns=max_turns,
             temperature=temperature,
             max_tokens=max_tokens,

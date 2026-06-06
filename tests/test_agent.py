@@ -14,6 +14,7 @@ def test_google_model_helpers():
     assert agent._is_google_model("gemini-3.1-pro-preview")
     assert not agent._is_google_model("openai/gpt-5.4")
     assert agent._is_openai_model("openai/gpt-5.4")
+    assert agent._is_codex_model("codex/gpt-5.4:xhigh")
     assert not agent._is_openai_model("google/gemini-3.1-pro-preview")
     assert agent._get_gemini_model_name("google/gemini-3.1-pro-preview") == "gemini-3.1-pro-preview"
     assert agent._get_gemini_model_name("gemini-3.1-pro-preview") == "gemini-3.1-pro-preview"
@@ -102,12 +103,58 @@ def test_run_agent_routes_openai_direct_from_env(monkeypatch):
     assert calls[0]["key_pool"].acquire() == "openai-key"
 
 
+def test_run_agent_routes_codex_oauth_when_enabled(monkeypatch):
+    calls = []
+
+    def fake_codex_agent(**kwargs):
+        calls.append(kwargs)
+        return "ok"
+
+    monkeypatch.setenv("BRRRAGENT_OPENAI_BACKEND", "codex_oauth")
+    monkeypatch.setenv("OPENAI_API_KEY_PERSONAL", "openai-key")
+    monkeypatch.setattr("brrragent.codex_oauth.run_codex_oauth_agent", fake_codex_agent)
+
+    assert agent.run_agent(
+        system_prompt="system",
+        user_prompt="user",
+        model="openai/gpt-5.5:xhigh",
+        mcp=DummyMcp(),
+    ) == "ok"
+
+    assert calls[0]["model"] == "openai/gpt-5.5:xhigh"
+    assert calls[0]["system_prompt"] == "system"
+    assert calls[0]["user_prompt"] == "user"
+
+
+def test_run_agent_routes_codex_prefix_without_env(monkeypatch):
+    calls = []
+
+    def fake_codex_agent(**kwargs):
+        calls.append(kwargs)
+        return "ok"
+
+    monkeypatch.delenv("BRRRAGENT_OPENAI_BACKEND", raising=False)
+    monkeypatch.delenv("BRRRAGENT_CODEX_OAUTH", raising=False)
+    monkeypatch.setattr("brrragent.codex_oauth.run_codex_oauth_agent", fake_codex_agent)
+
+    assert agent.run_agent(
+        system_prompt="system",
+        user_prompt="user",
+        model="codex/gpt-5.4:xhigh",
+        mcp=DummyMcp(),
+    ) == "ok"
+
+    assert calls[0]["model"] == "codex/gpt-5.4:xhigh"
+
+
 def test_run_agent_requires_api_key_when_no_pool(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY_PERSONAL", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY_CORP", raising=False)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("BRRRAGENT_OPENAI_BACKEND", raising=False)
+    monkeypatch.delenv("BRRRAGENT_CODEX_OAUTH", raising=False)
 
     with pytest.raises(ValueError, match="No API key"):
         agent.run_agent(

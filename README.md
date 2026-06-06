@@ -1,10 +1,11 @@
 # brrragent
 
-Reusable agentic react loop with MCP tool calling. Supports **OpenRouter**, **OpenAI direct**, and **Google Gemini direct** backends with automatic smart routing.
+Reusable agentic react loop with MCP tool calling. Supports **OpenRouter**, **OpenAI direct**, **OpenCode/Codex OAuth**, and **Google Gemini direct** backends with automatic smart routing.
 
 ## Features
 
 - **Smart routing** — automatically picks the cheapest/best backend based on model name and available API keys
+- **Codex OAuth opt-in** — can use `codex/*` models or route `openai/*` through OpenCode's ChatGPT/Codex OAuth token for local Codex-plan usage
 - **Comma-separated API keys** — spread load across multiple keys for rate-limit resilience and caching
 - **MCP tool calling** — bridges any MCP JSON-RPC endpoint into LLM function-calling (both OpenAI and Gemini formats)
 - **Structured output** — JSON schema enforcement on OpenRouter/OpenAI (`response_format`) and Gemini (`response_schema`)
@@ -43,10 +44,12 @@ print(result)
 
 That's it. The agent will:
 1. Detect `google/` prefix → check if `GEMINI_API_KEY` is set → use Gemini direct (no OpenRouter premium)
-2. Detect `openai/` prefix → check if an OpenAI key is set → use OpenAI direct with reasoning suffix support
-3. Fall back to OpenRouter if direct-provider keys are missing
-4. Pick a random key if the env var contains comma-separated keys
-4. Use MCP tools (web search, news, etc.) to research and answer
+2. Detect `codex/` prefix → use OpenCode/Codex OAuth
+3. Detect `openai/` prefix + `BRRRAGENT_OPENAI_BACKEND=codex_oauth` → use OpenCode/Codex OAuth
+4. Detect `openai/` prefix → check if an OpenAI key is set → use OpenAI direct with reasoning suffix support
+5. Fall back to OpenRouter if direct-provider keys are missing
+6. Pick a random key if the env var contains comma-separated keys
+7. Use MCP tools (web search, news, etc.) to research and answer
 
 ## Smart Routing
 
@@ -56,6 +59,8 @@ The routing decision is automatic based on model name and available environment 
 |---|---|---|
 | `google/gemini-3.1-pro-preview` | ✅ | **Gemini direct** (free, no OpenRouter premium) |
 | `google/gemini-3.1-pro-preview` | ❌ | **OpenRouter** (uses `OPENROUTER_API_KEY`) |
+| `codex/gpt-5.4:xhigh` | OpenCode OAuth token exists | **OpenCode/Codex OAuth** (uses `~/.local/share/opencode/auth.json`) |
+| `openai/gpt-5.5:xhigh` | `BRRRAGENT_OPENAI_BACKEND=codex_oauth` | **OpenCode/Codex OAuth** (uses `~/.local/share/opencode/auth.json`) |
 | `openai/gpt-5.5:xhigh` | ✅ | **OpenAI direct** (uses `OPENAI_API_KEY_PERSONAL`, `OPENAI_API_KEY`, or `OPENAI_API_KEY_CORP`) |
 | `openai/gpt-5.5:xhigh` | ❌ | **OpenRouter** (uses `OPENROUTER_API_KEY`) |
 | `anthropic/claude-4.6-sonnet` | — | **OpenRouter** (always) |
@@ -81,7 +86,23 @@ result = run_agent(
 | `OPENAI_API_KEY` | One of these | Direct OpenAI API key(s), comma-separated |
 | `OPENAI_API_KEY_CORP` | One of these | Fallback direct OpenAI API key(s), comma-separated |
 | `GEMINI_API_KEY` | One of these | Google Gemini API key(s), comma-separated |
+| `BRRRAGENT_OPENAI_BACKEND=codex_oauth` | No | Route `openai/*` through OpenCode's ChatGPT/Codex OAuth token instead of Platform/OpenRouter |
+| `BRRRAGENT_OPENCODE_AUTH_PATH` | No | Override OpenCode auth path (default `~/.local/share/opencode/auth.json`) |
 | `MCP_CRAWLERPY_URL` | No | MCP endpoint (defaults to `https://crawlerpy.brunovolpato.com/mcp`) |
+
+### OpenCode / Codex OAuth
+
+This route is intended for local tooling, not production workers:
+
+```bash
+# Direct Codex model prefix
+MODEL_STORYMAKER_EXECUTION=codex/gpt-5.4:xhigh
+
+# Or redirect existing openai/* model configs
+BRRRAGENT_OPENAI_BACKEND=codex_oauth
+```
+
+It refreshes the OpenAI OAuth token stored by OpenCode, then calls `https://chatgpt.com/backend-api/codex/responses`. It mirrors OpenCode's Codex API contract: `store=false`, `stream=true`, no `max_output_tokens`, and `ChatGPT-Account-Id` when present.
 
 ### Comma-Separated Keys
 
