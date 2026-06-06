@@ -2,6 +2,7 @@ import json
 
 from brrragent.codex_oauth import (
     _build_payload,
+    _codex_timeout_seconds,
     _extract_function_calls,
     _extract_response_text,
     _get_codex_access_token,
@@ -73,6 +74,14 @@ def test_has_opencode_oauth_reads_configured_path(tmp_path, monkeypatch):
     monkeypatch.setenv("BRRRAGENT_OPENCODE_AUTH_PATH", str(auth_path))
 
     assert has_opencode_oauth()
+
+
+def test_codex_timeout_uses_env_with_floor(monkeypatch):
+    monkeypatch.setenv("BRRRAGENT_CODEX_TIMEOUT_SECONDS", "12")
+    assert _codex_timeout_seconds() == 30
+
+    monkeypatch.setenv("BRRRAGENT_CODEX_TIMEOUT_SECONDS", "120")
+    assert _codex_timeout_seconds() == 120
 
 
 def test_get_codex_access_token_reuses_valid_access(tmp_path, monkeypatch):

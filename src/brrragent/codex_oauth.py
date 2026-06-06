@@ -41,6 +41,14 @@ def _auth_path() -> Path:
     return Path(os.getenv("BRRRAGENT_OPENCODE_AUTH_PATH", DEFAULT_AUTH_PATH)).expanduser()
 
 
+def _codex_timeout_seconds() -> int:
+    raw = os.getenv("BRRRAGENT_CODEX_TIMEOUT_SECONDS") or os.getenv("AI_CLIENT_TIMEOUT_SECONDS")
+    try:
+        return max(30, int(raw or "900"))
+    except ValueError:
+        return 900
+
+
 def _auth_lock_path(path: Path) -> Path:
     return path.with_name(f"{path.name}.brrragent.lock")
 
@@ -339,7 +347,7 @@ def run_codex_oauth_agent(
         last_err = None
         for attempt in range(1, max_retries + 1):
             try:
-                result = _stream_codex_response(payload, headers)
+                result = _stream_codex_response(payload, headers, timeout=_codex_timeout_seconds())
                 break
             except Exception as exc:
                 last_err = exc
