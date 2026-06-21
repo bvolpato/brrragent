@@ -10,7 +10,7 @@ import logging
 import time
 from typing import Callable, Optional
 
-from brrragent.keys import KeyPool, RateLimitExhausted
+from brrragent.keys import KeyPool
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,7 @@ def run_openrouter_agent(
     max_retries: int,
     on_tool_call: Optional[Callable],
     response_schema: dict | None,
+    reasoning_effort: str | None = None,
 ) -> str:
     """Run the agent using an OpenAI-compatible API (OpenRouter, OpenAI, etc.).
 
@@ -93,6 +94,7 @@ def run_openrouter_agent(
             key_pool=key_pool,
             current_key=selected_key,
             base_url=base_url,
+            reasoning_effort=reasoning_effort,
         )
 
         # Unpack pool rotation if applicable
@@ -161,6 +163,7 @@ def _call_with_retry(
     key_pool: KeyPool | None = None,
     current_key: str = "",
     base_url: str = "",
+    reasoning_effort: str | None = None,
 ):
     """Call the OpenAI-compatible API with exponential backoff on transient errors.
 
@@ -179,10 +182,15 @@ def _call_with_retry(
                 model=model,
                 messages=messages,
                 tools=tools if tools else None,
-                temperature=temperature,
-                max_tokens=max_tokens,
                 extra_headers={"X-Title": "brrragent"},
             )
+            if reasoning_effort is not None:
+                kwargs["max_completion_tokens"] = max_tokens
+                if reasoning_effort:
+                    kwargs["reasoning_effort"] = reasoning_effort
+            else:
+                kwargs["temperature"] = temperature
+                kwargs["max_tokens"] = max_tokens
             if response_format:
                 kwargs["response_format"] = response_format
             resp = client.chat.completions.create(**kwargs)

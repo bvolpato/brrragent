@@ -9,6 +9,7 @@ Routing logic:
   - model starts with "google/" or "gemini-" + Gemini keys available → Gemini direct
   - model starts with "fireworks/" + FIREWORKS_API_KEY → Fireworks native
   - model starts with "minimax/" + MINIMAX_API_KEY → MiniMax native
+  - model starts with "yunwu/" + YUNWU_API_KEY → Yunwu native
   - model starts with "codex/" → Codex OAuth
   - model starts with "openai/" + BRRRAGENT_OPENAI_BACKEND=codex_oauth → Codex OAuth
   - model starts with "openai/" + OpenAI keys available → OpenAI direct
@@ -37,7 +38,7 @@ import logging
 import os
 from typing import Callable, Optional
 
-from brrragent.keys import pick_key, KeyPool
+from brrragent.keys import KeyPool
 from brrragent.mcp_tools import McpToolCaller
 
 logger = logging.getLogger(__name__)
@@ -50,6 +51,7 @@ MAX_TOOL_TURNS = 12
 NATIVE_PROVIDERS: dict[str, tuple[str, str]] = {
     "fireworks/": ("https://api.fireworks.ai/inference/v1", "FIREWORKS_API_KEY"),
     "minimax/":   ("https://api.minimax.io/v1",              "MINIMAX_API_KEY"),
+    "yunwu/":     ("https://yunwu.ai/v1",                    "YUNWU_API_KEY"),
 }
 
 
@@ -150,7 +152,7 @@ def run_agent(
       - If model starts with "codex/" → Codex OAuth
       - If model starts with "openai/" and BRRRAGENT_OPENAI_BACKEND=codex_oauth → Codex OAuth
       - If model starts with "openai/" and OpenAI keys are available → OpenAI direct
-      - If model starts with a native provider prefix (fireworks/, minimax/) and
+      - If model starts with a native provider prefix (fireworks/, minimax/, yunwu/) and
         the corresponding env var is set → provider's native API
       - Otherwise → OpenRouter with OPENROUTER_API_KEY
 
@@ -280,9 +282,13 @@ def run_agent(
     native = _resolve_native_provider(model) if api_key is None else None
 
     if native is not None:
+        from brrragent.openai_direct import parse_openai_model
         from brrragent.openrouter import run_openrouter_agent
 
         native_base_url, native_api_key, provider_name, bare_model = native
+        reasoning_effort = None
+        if provider_name == "yunwu":
+            bare_model, reasoning_effort = parse_openai_model(bare_model)
         logger.info("[agent] Using %s native (model=%s)", provider_name, bare_model)
         return run_openrouter_agent(
             system_prompt=system_prompt,
@@ -299,6 +305,7 @@ def run_agent(
             max_retries=max_retries,
             on_tool_call=on_tool_call,
             response_schema=response_schema,
+            reasoning_effort=reasoning_effort,
         )
 
     # Fallback: OpenRouter

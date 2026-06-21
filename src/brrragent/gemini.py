@@ -12,7 +12,7 @@ import logging
 import time
 from typing import Callable, Optional
 
-from brrragent.keys import KeyPool, RateLimitExhausted
+from brrragent.keys import KeyPool
 
 logger = logging.getLogger(__name__)
 

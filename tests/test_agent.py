@@ -31,6 +31,17 @@ def test_resolve_native_provider_uses_env_key_and_strips_prefix(monkeypatch):
     )
 
 
+def test_resolve_native_provider_supports_yunwu(monkeypatch):
+    monkeypatch.setenv("YUNWU_API_KEY", "yunwu-key")
+
+    assert agent._resolve_native_provider("yunwu/gpt-5.4:high") == (
+        "https://yunwu.ai/v1",
+        "yunwu-key",
+        "yunwu",
+        "gpt-5.4:high",
+    )
+
+
 def test_resolve_native_provider_falls_back_without_env_key(monkeypatch):
     monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
 
@@ -57,6 +68,29 @@ def test_run_agent_routes_native_provider(monkeypatch):
     assert calls[0]["model"] == "text-01"
     assert calls[0]["api_key"] == "minimax-key"
     assert calls[0]["base_url"] == "https://api.minimax.io/v1"
+
+
+def test_run_agent_routes_yunwu_native_provider(monkeypatch):
+    calls = []
+
+    def fake_openrouter_agent(**kwargs):
+        calls.append(kwargs)
+        return "ok"
+
+    monkeypatch.setenv("YUNWU_API_KEY", "yunwu-key")
+    monkeypatch.setattr("brrragent.openrouter.run_openrouter_agent", fake_openrouter_agent)
+
+    assert agent.run_agent(
+        system_prompt="system",
+        user_prompt="user",
+        model="yunwu/gpt-5.4:high",
+        mcp=DummyMcp(),
+    ) == "ok"
+
+    assert calls[0]["model"] == "gpt-5.4"
+    assert calls[0]["api_key"] == "yunwu-key"
+    assert calls[0]["base_url"] == "https://yunwu.ai/v1"
+    assert calls[0]["reasoning_effort"] == "high"
 
 
 def test_run_agent_routes_gemini_key_pool(monkeypatch):
