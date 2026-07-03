@@ -52,6 +52,10 @@ NATIVE_PROVIDERS: dict[str, tuple[str, str]] = {
     "fireworks/": ("https://api.fireworks.ai/inference/v1", "FIREWORKS_API_KEY"),
     "minimax/":   ("https://api.minimax.io/v1",              "MINIMAX_API_KEY"),
     "yunwu/":     ("https://yunwu.ai/v1",                    "YUNWU_API_KEY"),
+    "z-ai/": (
+        os.environ.get("ZAI_BASE_URL", "https://api.z.ai/api/coding/paas/v4"),
+        "ZAI_API_KEY",
+    ),
 }
 
 
@@ -287,8 +291,10 @@ def run_agent(
 
         native_base_url, native_api_key, provider_name, bare_model = native
         reasoning_effort = None
-        if provider_name == "yunwu":
+        if provider_name in {"yunwu", "z-ai"}:
             bare_model, reasoning_effort = parse_openai_model(bare_model)
+        if provider_name == "z-ai" and not reasoning_effort:
+            reasoning_effort = os.environ.get("ZAI_REASONING_EFFORT", "xhigh").strip() or "xhigh"
         logger.info("[agent] Using %s native (model=%s)", provider_name, bare_model)
         return run_openrouter_agent(
             system_prompt=system_prompt,

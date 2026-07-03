@@ -14,6 +14,10 @@ import fcntl
 import json
 import logging
 import os
+import platform
+import shutil
+import subprocess
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -28,6 +32,14 @@ CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 TOKEN_URL = "https://auth.openai.com/oauth/token"
 CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses"
 DEFAULT_AUTH_PATH = "~/.local/share/opencode/auth.json"
+CODEX_SPARK_MODEL = "gpt-5.3-codex-spark"
+CODEX_CLI_ORIGINATOR = "codex_cli_rs"
+CODEX_CLI_PROMPT = """{system_prompt}
+
+User request:
+{user_prompt}
+
+Return the final answer only. Do not inspect files. Do not run commands."""
 _RETRYABLE_MARKERS = ("429", "500", "502", "503", "504", "timeout", "temporarily unavailable")
 
 
@@ -35,6 +47,11 @@ def parse_codex_model(model: str) -> tuple[str, str | None]:
     if model.startswith("codex/"):
         return parse_openai_model("openai/" + model[len("codex/") :])
     return parse_openai_model(model)
+
+
+def _is_codex_spark_model(model: str) -> bool:
+    bare_model, _reasoning_effort = parse_codex_model(model)
+    return model.startswith("codex/") and bare_model == CODEX_SPARK_MODEL
 
 
 def _auth_path() -> Path:
@@ -51,6 +68,205 @@ def _codex_timeout_seconds() -> int:
 
 def _auth_lock_path(path: Path) -> Path:
     return path.with_name(f"{path.name}.brrragent.lock")
+
+
+def _codex_cli_auth_path() -> Path:
+    codex_home = Path(os.getenv("CODEX_HOME", "~/.codex")).expanduser()
+    return codex_home / "auth.json"
+
+
+def _codex_installation_id_path() -> Path:
+    configured = os.getenv("BRRRAGENT_CODEX_INSTALLATION_ID_PATH", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    codex_home = Path(os.getenv("CODEX_HOME", "~/.codex")).expanduser()
+    return codex_home / "installation_id"
+
+
+def _read_nonempty_text(path: Path) -> str | None:
+    try:
+        value = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return None
+    return value or None
+
+
+def _codex_installation_id() -> str:
+    configured = os.getenv("BRRRAGENT_CODEX_INSTALLATION_ID", "").strip()
+    if configured:
+        return configured
+
+    codex_installation_id = _read_nonempty_text(_codex_installation_id_path())
+    if codex_installation_id:
+        return codex_installation_id
+
+    fallback_path = Path(
+        os.getenv(
+            "BRRRAGENT_CODEX_FALLBACK_INSTALLATION_ID_PATH",
+            "~/.cache/brrragent/codex-installation-id",
+        )
+    ).expanduser()
+    fallback_installation_id = _read_nonempty_text(fallback_path)
+    if fallback_installation_id:
+        return fallback_installation_id
+
+    installation_id = str(uuid.uuid4())
+    try:
+        fallback_path.parent.mkdir(parents=True, exist_ok=True)
+        fallback_path.write_text(installation_id, encoding="utf-8")
+        fallback_path.chmod(0o600)
+    except OSError:
+        pass
+    return installation_id
+
+
+def _codex_user_agent() -> str:
+    configured = os.getenv("BRRRAGENT_CODEX_USER_AGENT", "").strip()
+    if configured:
+        return configured
+
+    os_name = platform.system() or "unknown"
+    os_version = platform.release() or "unknown"
+    arch = platform.machine() or "unknown"
+    return f"{CODEX_CLI_ORIGINATOR}/0.0.0 ({os_name} {os_version}; {arch}) brrragent"
+
+
+def _codex_request_identity(model: str) -> dict[str, str] | None:
+    if not _is_codex_spark_model(model):
+        return None
+    return {
+        "installation_id": _codex_installation_id(),
+        "session_id": str(uuid.uuid4()),
+        "thread_id": str(uuid.uuid4()),
+        "window_id": str(uuid.uuid4()),
+    }
+
+
+def _codex_cli_binary() -> str:
+    configured = os.getenv("BRRRAGENT_CODEX_CLI", "").strip()
+    if configured:
+        if os.sep in configured:
+            path = Path(configured).expanduser()
+            if path.is_file() and os.access(path, os.X_OK):
+                return str(path)
+        else:
+            resolved = shutil.which(configured)
+            if resolved:
+                return resolved
+        raise ValueError(f"codex CLI not found for gpt-5.3-codex-spark: {configured}")
+    resolved = shutil.which("codex")
+    if not resolved:
+        raise ValueError("codex CLI not found for gpt-5.3-codex-spark")
+    return resolved
+
+
+def _codex_cli_cwd() -> str:
+    return os.getenv("BRRRAGENT_CODEX_CLI_CWD", "/tmp").strip() or "/tmp"
+
+
+def _codex_cli_prompt(system_prompt: str, user_prompt: str) -> str:
+    return CODEX_CLI_PROMPT.format(
+        system_prompt=(system_prompt or "You are a terse completion engine.").strip(),
+        user_prompt=(user_prompt or "").strip(),
+    )
+
+
+def _codex_cli_config_args(reasoning_effort: str | None) -> list[str]:
+    if not reasoning_effort or reasoning_effort == "none":
+        return []
+    return ["-c", f'model_reasoning_effort="{reasoning_effort}"']
+
+
+def _parse_codex_cli_jsonl(stdout: str) -> str:
+    last_message = ""
+    last_error = ""
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line or not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") == "item.completed":
+            item = event.get("item") or {}
+            if item.get("type") == "agent_message" and item.get("text"):
+                last_message = item["text"]
+        elif event.get("type") == "error":
+            last_error = str(event.get("message") or event)
+        elif event.get("type") == "turn.failed":
+            error_obj = event.get("error") or {}
+            last_error = str(error_obj.get("message") or event)
+    if last_message:
+        return last_message
+    raise ValueError(last_error or "Codex CLI returned no agent_message")
+
+
+def _run_codex_cli_spark_completion(
+    *,
+    system_prompt: str,
+    user_prompt: str,
+    model: str,
+    response_schema: dict | None,
+    timeout: int,
+) -> str:
+    bare_model, reasoning_effort = parse_codex_model(model)
+    cmd = [
+        _ensure_codex_cli_ready(),
+        "exec",
+        "--ephemeral",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--skip-git-repo-check",
+        "-s",
+        "read-only",
+        "-C",
+        _codex_cli_cwd(),
+        "-m",
+        bare_model,
+        *_codex_cli_config_args(reasoning_effort),
+        "--json",
+    ]
+    prompt = _codex_cli_prompt(system_prompt, user_prompt)
+
+    schema_path = None
+    try:
+        if response_schema:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                suffix=".schema.json",
+                delete=False,
+            ) as schema_file:
+                json.dump(response_schema, schema_file)
+                schema_path = schema_file.name
+            cmd.extend(["--output-schema", schema_path])
+        cmd.append(prompt)
+
+        proc = subprocess.run(
+            cmd,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError(f"Codex CLI timed out after {timeout}s") from exc
+    finally:
+        if schema_path:
+            try:
+                os.unlink(schema_path)
+            except OSError:
+                pass
+
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()[:2000]
+        raise ValueError(f"Codex CLI failed with exit {proc.returncode}: {detail}")
+    return _parse_codex_cli_jsonl(proc.stdout)
 
 
 def _read_auth_file(path: Path) -> dict:
@@ -71,6 +287,65 @@ def _write_auth_file(path: Path, auth: dict) -> None:
         mode = 0o600
     tmp_path.chmod(mode)
     os.replace(tmp_path, path)
+
+
+def _is_codex_cli_auth(auth: dict | None) -> bool:
+    if not isinstance(auth, dict):
+        return False
+    tokens = auth.get("tokens")
+    return (
+        isinstance(tokens, dict)
+        and bool(tokens.get("id_token"))
+        and bool(tokens.get("access_token"))
+        and bool(tokens.get("refresh_token"))
+    )
+
+
+def _read_codex_cli_auth() -> dict:
+    path = _codex_cli_auth_path()
+    try:
+        auth = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ValueError(
+            f"Codex CLI auth file not found: {path}. "
+            "Set CODEX_HOME to a directory with auth.json or run scripts/codex_auth_device_login.py."
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Codex CLI auth file is invalid JSON: {path}") from exc
+    except OSError as exc:
+        raise ValueError(f"Codex CLI auth file unreadable: {path}: {exc}") from exc
+
+    if not _is_codex_cli_auth(auth):
+        raise ValueError(
+            f"Codex CLI auth file missing tokens.id_token/access_token/refresh_token: {path}"
+        )
+    return auth
+
+
+def _ensure_codex_cli_ready() -> str:
+    binary = _codex_cli_binary()
+    _read_codex_cli_auth()
+    return binary
+
+
+def _sync_codex_cli_auth(openai_auth: dict) -> None:
+    path = _codex_cli_auth_path()
+    try:
+        auth = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return
+    if not _is_codex_cli_auth(auth):
+        return
+
+    tokens = dict(auth["tokens"])
+    tokens["access_token"] = openai_auth["access"]
+    tokens["refresh_token"] = openai_auth["refresh"]
+    if openai_auth.get("accountId"):
+        tokens["account_id"] = openai_auth["accountId"]
+    auth["tokens"] = tokens
+    auth["auth_mode"] = auth.get("auth_mode") or "chatgpt"
+    auth["last_refresh"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    _write_auth_file(path, auth)
 
 
 def has_opencode_oauth() -> bool:
@@ -171,10 +446,37 @@ def _get_codex_access_token() -> tuple[str, str | None]:
         refreshed_auth, access_token, account_id = _refresh_access_token(openai_auth)
         auth["openai"] = refreshed_auth
         _write_auth_file(path, auth)
+        _sync_codex_cli_auth(refreshed_auth)
         return access_token, account_id
 
 
-def _codex_headers(access_token: str, account_id: str | None) -> dict[str, str]:
+def _codex_headers(
+    access_token: str,
+    account_id: str | None,
+    *,
+    model: str | None = None,
+    request_identity: dict[str, str] | None = None,
+) -> dict[str, str]:
+    if model and _is_codex_spark_model(model):
+        identity = request_identity or _codex_request_identity(model) or {}
+        thread_id = identity.get("thread_id") or str(uuid.uuid4())
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "originator": CODEX_CLI_ORIGINATOR,
+            "User-Agent": _codex_user_agent(),
+            "session-id": identity.get("session_id") or str(uuid.uuid4()),
+            "thread-id": thread_id,
+            "x-client-request-id": thread_id,
+            "x-codex-installation-id": identity.get("installation_id")
+            or _codex_installation_id(),
+            "x-codex-window-id": identity.get("window_id") or str(uuid.uuid4()),
+        }
+        if account_id:
+            headers["ChatGPT-Account-ID"] = account_id
+        return headers
+
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
@@ -274,6 +576,7 @@ def _build_payload(
     tools: list[dict],
     response_schema: dict | None,
     previous_response_id: str | None = None,
+    request_identity: dict[str, str] | None = None,
 ) -> dict:
     del previous_response_id
     bare_model, reasoning_effort = parse_codex_model(model)
@@ -287,6 +590,20 @@ def _build_payload(
         payload["instructions"] = instructions
     if reasoning_effort and reasoning_effort != "none":
         payload["reasoning"] = {"effort": reasoning_effort}
+    if request_identity:
+        payload["client_metadata"] = {
+            "x-codex-installation-id": request_identity["installation_id"],
+            "session_id": request_identity["session_id"],
+            "thread_id": request_identity["thread_id"],
+            "x-codex-window-id": request_identity["window_id"],
+        }
+    if _is_codex_spark_model(model):
+        payload["prompt_cache_key"] = os.getenv(
+            "BRRRAGENT_CODEX_SPARK_PROMPT_CACHE_KEY",
+            "brrragent-codex-spark",
+        )
+        if payload.get("reasoning"):
+            payload["include"] = ["reasoning.encrypted_content"]
     if tools:
         payload["tools"] = [_to_responses_tool(tool) for tool in tools]
     if response_schema:
@@ -323,8 +640,26 @@ def run_codex_oauth_agent(
     """Run the agent against ChatGPT/Codex Responses using OpenCode OAuth."""
     del temperature, max_tokens
 
+    if _is_codex_spark_model(model):
+        tools = mcp.get_openai_tools()
+        if tools or extra_tools:
+            raise ValueError("codex/gpt-5.3-codex-spark CLI route does not support tools")
+        return _run_codex_cli_spark_completion(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            model=model,
+            response_schema=response_schema,
+            timeout=_codex_timeout_seconds(),
+        )
+
     access_token, account_id = _get_codex_access_token()
-    headers = _codex_headers(access_token, account_id)
+    request_identity = _codex_request_identity(model)
+    headers = _codex_headers(
+        access_token,
+        account_id,
+        model=model,
+        request_identity=request_identity,
+    )
 
     tools = mcp.get_openai_tools()
     if extra_tools:
@@ -342,6 +677,7 @@ def run_codex_oauth_agent(
             input_items=input_items,
             tools=tools,
             response_schema=response_schema,
+            request_identity=request_identity,
         )
 
         last_err = None
