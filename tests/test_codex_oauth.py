@@ -17,6 +17,7 @@ from brrragent.codex_oauth import (
     _sync_codex_cli_auth,
     has_opencode_oauth,
     parse_codex_model,
+    run_codex_oauth_agent,
 )
 
 
@@ -52,6 +53,60 @@ def test_parse_codex_cli_jsonl_extracts_last_agent_message():
     )
 
     assert _parse_codex_cli_jsonl(stdout) == "SPARK_OK"
+
+
+def test_codex_agent_forces_final_synthesis_after_tool_turn_limit(monkeypatch):
+    payloads = []
+
+    class FakeMcp:
+        def get_openai_tools(self):
+            return [{"type": "function", "name": "search"}]
+
+        def call_tool(self, name, arguments):
+            assert name == "search"
+            assert arguments == {"q": "Qumran"}
+            return "Documented evidence"
+
+    def fake_stream(payload, _headers, timeout):
+        assert timeout > 0
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return {
+                "function_calls": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_1",
+                        "name": "search",
+                        "arguments": '{"q":"Qumran"}',
+                    }
+                ]
+            }
+        return {"text": "Synthesized research dossier", "function_calls": []}
+
+    monkeypatch.setattr(
+        "brrragent.codex_oauth._get_codex_access_token", lambda: ("access", "account")
+    )
+    monkeypatch.setattr("brrragent.codex_oauth._stream_codex_response", fake_stream)
+
+    result = run_codex_oauth_agent(
+        system_prompt="Research accurately.",
+        user_prompt="Research Qumran.",
+        model="codex/gpt-5.5:xhigh",
+        mcp=FakeMcp(),
+        extra_tools=None,
+        max_turns=1,
+        temperature=0.2,
+        max_tokens=1000,
+        max_retries=2,
+        on_tool_call=None,
+        response_schema=None,
+    )
+
+    assert result == "Synthesized research dossier"
+    assert len(payloads) == 2
+    assert "tools" not in payloads[1]
+    assert "Stop calling tools" in str(payloads[1]["input"])
+    assert "Documented evidence" in str(payloads[1]["input"])
 
 
 def _write_codex_cli_auth(codex_home):

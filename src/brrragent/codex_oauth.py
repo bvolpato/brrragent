@@ -729,5 +729,47 @@ def run_codex_oauth_agent(
             )
         input_items = next_items
 
-    logger.warning("[agent] Reached max_turns=%d without final response", max_turns)
-    return "[No final response after max tool turns]"
+    logger.warning(
+        "[agent] Reached max_turns=%d without final response; requesting final answer without tools",
+        max_turns,
+    )
+    input_items.append(
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": "Stop calling tools. Provide the final answer using the evidence already gathered.",
+                }
+            ],
+        }
+    )
+    payload = _build_payload(
+        model=model,
+        instructions=system_prompt,
+        input_items=input_items,
+        tools=[],
+        response_schema=response_schema,
+        request_identity=request_identity,
+    )
+
+    last_err = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            result = _stream_codex_response(payload, headers, timeout=_codex_timeout_seconds())
+            final_text = result.get("text", "")
+            logger.info("[agent] Final no-tool response after max_turns (%d chars)", len(final_text))
+            return final_text or "[No final response after max tool turns]"
+        except Exception as exc:
+            last_err = exc
+            logger.warning(
+                "[agent] Codex OAuth final synthesis attempt %d/%d failed: %s",
+                attempt,
+                max_retries,
+                str(exc)[:200],
+            )
+            if not _is_transient_error(exc) or attempt >= max_retries:
+                raise
+            time.sleep(min(2**attempt, 30))
+
+    raise ValueError(f"Codex OAuth final synthesis failed after {max_retries} retries: {last_err}")
