@@ -1,11 +1,4 @@
-"""
-Codex OAuth backend using OpenCode's stored ChatGPT/Codex login.
-
-This backend mirrors OpenCode's OpenAI provider behavior:
-  - read ~/.local/share/opencode/auth.json
-  - refresh the OpenAI OAuth token
-  - call https://chatgpt.com/backend-api/codex/responses
-"""
+"""Codex OAuth backend using brrragent-managed credentials."""
 
 from __future__ import annotations
 
@@ -32,7 +25,8 @@ logger = logging.getLogger(__name__)
 CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 TOKEN_URL = "https://auth.openai.com/oauth/token"
 CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses"
-DEFAULT_AUTH_PATH = "~/.local/share/opencode/auth.json"
+DEFAULT_AUTH_PATH = "~/.cache/brrragent/codex-auth.json"
+DEFAULT_CODEX_HOME = "~/.cache/brrragent/codex-home"
 CODEX_SPARK_MODEL = "gpt-5.3-codex-spark"
 CODEX_CLI_ORIGINATOR = "codex_cli_rs"
 CODEX_CLI_PROMPT = """{system_prompt}
@@ -64,9 +58,11 @@ def _is_codex_spark_model(model: str) -> bool:
 
 
 def _auth_path() -> Path:
-    return Path(
-        os.getenv("BRRRAGENT_OPENCODE_AUTH_PATH", DEFAULT_AUTH_PATH)
-    ).expanduser()
+    configured = (
+        os.getenv("BRRRAGENT_AUTH_PATH", "").strip()
+        or os.getenv("BRRRAGENT_OPENCODE_AUTH_PATH", "").strip()
+    )
+    return Path(configured or DEFAULT_AUTH_PATH).expanduser()
 
 
 def _codex_timeout_seconds() -> int:
@@ -83,17 +79,23 @@ def _auth_lock_path(path: Path) -> Path:
     return path.with_name(f"{path.name}.brrragent.lock")
 
 
+def _codex_home() -> Path:
+    configured = (
+        os.getenv("BRRRAGENT_CODEX_HOME", "").strip()
+        or os.getenv("CODEX_HOME", "").strip()
+    )
+    return Path(configured or DEFAULT_CODEX_HOME).expanduser()
+
+
 def _codex_cli_auth_path() -> Path:
-    codex_home = Path(os.getenv("CODEX_HOME", "~/.codex")).expanduser()
-    return codex_home / "auth.json"
+    return _codex_home() / "auth.json"
 
 
 def _codex_installation_id_path() -> Path:
     configured = os.getenv("BRRRAGENT_CODEX_INSTALLATION_ID_PATH", "").strip()
     if configured:
         return Path(configured).expanduser()
-    codex_home = Path(os.getenv("CODEX_HOME", "~/.codex")).expanduser()
-    return codex_home / "installation_id"
+    return _codex_home() / "installation_id"
 
 
 def _read_nonempty_text(path: Path) -> str | None:
@@ -265,6 +267,7 @@ def _run_codex_cli_spark_completion(
             capture_output=True,
             timeout=timeout,
             check=False,
+            env={**os.environ, "CODEX_HOME": str(_codex_home())},
         )
     except subprocess.TimeoutExpired as exc:
         raise ValueError(f"Codex CLI timed out after {timeout}s") from exc
@@ -285,9 +288,11 @@ def _read_auth_file(path: Path) -> dict:
     try:
         return json.loads(path.read_text())
     except FileNotFoundError as exc:
-        raise ValueError(f"OpenCode auth file not found: {path}") from exc
+        raise ValueError(
+            f"brrragent auth file not found: {path}. Run `brrragent-auth login`."
+        ) from exc
     except json.JSONDecodeError as exc:
-        raise ValueError(f"OpenCode auth file is invalid JSON: {path}") from exc
+        raise ValueError(f"brrragent auth file is invalid JSON: {path}") from exc
 
 
 def _write_auth_file(path: Path, auth: dict) -> None:
@@ -320,7 +325,7 @@ def _read_codex_cli_auth() -> dict:
     except FileNotFoundError as exc:
         raise ValueError(
             f"Codex CLI auth file not found: {path}. "
-            "Set CODEX_HOME to a directory with auth.json or run scripts/codex_auth_device_login.py."
+            "Run `brrragent-auth login` or configure BRRRAGENT_CODEX_HOME."
         ) from exc
     except json.JSONDecodeError as exc:
         raise ValueError(f"Codex CLI auth file is invalid JSON: {path}") from exc
@@ -383,7 +388,7 @@ def _decode_jwt_payload(token: str) -> dict:
 def _validate_openai_auth(auth: dict, path: Path) -> dict:
     openai = auth.get("openai") or {}
     if openai.get("type") != "oauth" or not openai.get("refresh"):
-        raise ValueError(f"OpenCode OpenAI OAuth token not found in {path}")
+        raise ValueError(f"Codex OAuth token not found in {path}")
     return openai
 
 
@@ -665,7 +670,7 @@ def run_codex_oauth_agent(
     prompt_cache: PromptCacheConfig | None = None,
     on_usage: Callable[[AgentUsage], None] | None = None,
 ) -> str:
-    """Run the agent against ChatGPT/Codex Responses using OpenCode OAuth."""
+    """Run agent against ChatGPT/Codex Responses using managed OAuth."""
     del temperature, max_tokens
 
     if _is_codex_spark_model(model):
