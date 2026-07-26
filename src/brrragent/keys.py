@@ -44,7 +44,9 @@ class RateLimitExhausted(Exception):
     fall back to a different backend.
     """
 
-    def __init__(self, message: str = "All keys exhausted by 429 errors", evicted_key: str = ""):
+    def __init__(
+        self, message: str = "All keys exhausted by 429 errors", evicted_key: str = ""
+    ):
         super().__init__(message)
         self.evicted_key = evicted_key[-6:]
 
@@ -103,7 +105,10 @@ class KeyPool:
             chosen = random.choice(list(self._active))
             logger.debug(
                 "[%s-pool] Acquired key ...%s (%d active, %d evicted)",
-                self._name, chosen[-6:], len(self._active), len(self._evicted),
+                self._name,
+                chosen[-6:],
+                len(self._active),
+                len(self._evicted),
             )
             return chosen
 
@@ -116,7 +121,9 @@ class KeyPool:
             if len(self._active) <= 1:
                 logger.warning(
                     "[%s-pool] Last key ...%s hit 429 — resetting all %d keys and raising",
-                    self._name, key[-6:], len(self._all_keys),
+                    self._name,
+                    key[-6:],
+                    len(self._all_keys),
                 )
                 self._active = set(self._all_keys)
                 self._evicted.clear()
@@ -129,7 +136,10 @@ class KeyPool:
             self._evicted.add(key)
             logger.warning(
                 "[%s-pool] Evicted key ...%s (429). %d active, %d evicted",
-                self._name, key[-6:], len(self._active), len(self._evicted),
+                self._name,
+                key[-6:],
+                len(self._active),
+                len(self._evicted),
             )
 
     @property

@@ -7,7 +7,7 @@ Handles OpenAI reasoning-effort suffixes such as ``openai/gpt-5.5:xhigh``.
 import json
 import logging
 import time
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from brrragent.keys import KeyPool
 from brrragent.prompt_cache import AgentUsage, PromptCacheConfig, openai_usage
@@ -218,7 +218,7 @@ def run_openai_agent(
     temperature: float,
     max_tokens: int,
     max_retries: int,
-    on_tool_call: Optional[Callable],
+    on_tool_call: Callable | None,
     response_schema: dict | None,
     prompt_cache: PromptCacheConfig | None = None,
     on_usage: Callable[[AgentUsage], None] | None = None,
@@ -370,7 +370,7 @@ def _run_openai_responses_agent(
     max_tokens: int,
     max_retries: int,
     max_turns: int,
-    on_tool_call: Optional[Callable],
+    on_tool_call: Callable | None,
     response_schema: dict | None,
     key_pool: KeyPool | None,
     selected_key: str,

@@ -16,7 +16,11 @@ gemini = ["google-genai>=1.0.0"]
 
 [dependency-groups]
 dev = [
+    "check-wheel-contents>=0.6,<0.7",
     "pytest>=8.0.0",
+    "pytest-cov>=7,<8",
+    "ruff>=0.16,<0.17",
+    "twine>=6,<7",
 ]
 
 [build-system]
@@ -25,3 +29,30 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/brrragent"]
+
+[tool.hatch.build.targets.sdist]
+exclude = ["/.gitignore"]
+include = [
+    "/LICENSE",
+    "/README.md",
+    "/pyproject.toml",
+    "/src",
+    "/tests",
+]
+
+[tool.pytest.ini_options]
+addopts = ["--strict-config", "--strict-markers"]
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B"]
+
+[tool.coverage.run]
+source = ["brrragent"]
+
+[tool.coverage.report]
+fail_under = 60
+show_missing = true
+skip_covered = true

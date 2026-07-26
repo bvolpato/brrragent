@@ -8,7 +8,7 @@ pool evicts it and the agent retries with a fresh key.
 import json
 import logging
 import time
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from brrragent.keys import KeyPool
 from brrragent.prompt_cache import AgentUsage, PromptCacheConfig, openai_usage
@@ -55,7 +55,7 @@ def run_openrouter_agent(
     temperature: float,
     max_tokens: int,
     max_retries: int,
-    on_tool_call: Optional[Callable],
+    on_tool_call: Callable | None,
     response_schema: dict | None,
     reasoning_effort: str | None = None,
     prompt_cache: PromptCacheConfig | None = None,

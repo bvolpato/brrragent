@@ -20,8 +20,8 @@ import subprocess
 import tempfile
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Optional
 from urllib import error, parse, request
 
 from brrragent.openai_direct import _to_responses_tool, parse_openai_model
@@ -262,8 +262,7 @@ def _run_codex_cli_spark_completion(
             cmd,
             text=True,
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             timeout=timeout,
             check=False,
         )
@@ -661,7 +660,7 @@ def run_codex_oauth_agent(
     temperature: float,
     max_tokens: int,
     max_retries: int,
-    on_tool_call: Optional[Callable],
+    on_tool_call: Callable | None,
     response_schema: dict | None,
     prompt_cache: PromptCacheConfig | None = None,
     on_usage: Callable[[AgentUsage], None] | None = None,

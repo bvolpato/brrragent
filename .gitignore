@@ -1,7 +1,15 @@
 __pycache__/
 *.egg-info/
 .venv/
+.coverage
+.coverage.*
+.pytest_cache/
+.ruff_cache/
+coverage.xml
+htmlcov/
 build/
 dist/
 *.pyc
 .env
+.env.*
+!.env.example

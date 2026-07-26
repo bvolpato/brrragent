@@ -16,14 +16,22 @@ def test_google_model_helpers():
     assert agent._is_openai_model("openai/gpt-5.4")
     assert agent._is_codex_model("codex/gpt-5.4:xhigh")
     assert not agent._is_openai_model("google/gemini-3.1-pro-preview")
-    assert agent._get_gemini_model_name("google/gemini-3.1-pro-preview") == "gemini-3.1-pro-preview"
-    assert agent._get_gemini_model_name("gemini-3.1-pro-preview") == "gemini-3.1-pro-preview"
+    assert (
+        agent._get_gemini_model_name("google/gemini-3.1-pro-preview")
+        == "gemini-3.1-pro-preview"
+    )
+    assert (
+        agent._get_gemini_model_name("gemini-3.1-pro-preview")
+        == "gemini-3.1-pro-preview"
+    )
 
 
 def test_resolve_native_provider_uses_env_key_and_strips_prefix(monkeypatch):
     monkeypatch.setenv("FIREWORKS_API_KEY", "fw-key")
 
-    assert agent._resolve_native_provider("fireworks/accounts/fireworks/models/test") == (
+    assert agent._resolve_native_provider(
+        "fireworks/accounts/fireworks/models/test"
+    ) == (
         "https://api.fireworks.ai/inference/v1",
         "fw-key",
         "fireworks",
@@ -56,14 +64,19 @@ def test_run_agent_routes_native_provider(monkeypatch):
         return "ok"
 
     monkeypatch.setenv("MINIMAX_API_KEY", "minimax-key")
-    monkeypatch.setattr("brrragent.openrouter.run_openrouter_agent", fake_openrouter_agent)
+    monkeypatch.setattr(
+        "brrragent.openrouter.run_openrouter_agent", fake_openrouter_agent
+    )
 
-    assert agent.run_agent(
-        system_prompt="system",
-        user_prompt="user",
-        model="minimax/text-01",
-        mcp=DummyMcp(),
-    ) == "ok"
+    assert (
+        agent.run_agent(
+            system_prompt="system",
+            user_prompt="user",
+            model="minimax/text-01",
+            mcp=DummyMcp(),
+        )
+        == "ok"
+    )
 
     assert calls[0]["model"] == "text-01"
     assert calls[0]["api_key"] == "minimax-key"
@@ -78,14 +91,19 @@ def test_run_agent_routes_yunwu_native_provider(monkeypatch):
         return "ok"
 
     monkeypatch.setenv("YUNWU_API_KEY", "yunwu-key")
-    monkeypatch.setattr("brrragent.openrouter.run_openrouter_agent", fake_openrouter_agent)
+    monkeypatch.setattr(
+        "brrragent.openrouter.run_openrouter_agent", fake_openrouter_agent
+    )
 
-    assert agent.run_agent(
-        system_prompt="system",
-        user_prompt="user",
-        model="yunwu/gpt-5.4:high",
-        mcp=DummyMcp(),
-    ) == "ok"
+    assert (
+        agent.run_agent(
+            system_prompt="system",
+            user_prompt="user",
+            model="yunwu/gpt-5.4:high",
+            mcp=DummyMcp(),
+        )
+        == "ok"
+    )
 
     assert calls[0]["model"] == "gpt-5.4"
     assert calls[0]["api_key"] == "yunwu-key"
@@ -103,13 +121,16 @@ def test_run_agent_routes_gemini_key_pool(monkeypatch):
 
     monkeypatch.setattr("brrragent.gemini.run_gemini_agent", fake_gemini_agent)
 
-    assert agent.run_agent(
-        system_prompt="system",
-        user_prompt="user",
-        model="google/gemini-3.1-pro-preview",
-        gemini_key_pool=pool,
-        mcp=DummyMcp(),
-    ) == "ok"
+    assert (
+        agent.run_agent(
+            system_prompt="system",
+            user_prompt="user",
+            model="google/gemini-3.1-pro-preview",
+            gemini_key_pool=pool,
+            mcp=DummyMcp(),
+        )
+        == "ok"
+    )
 
     assert calls[0]["model"] == "gemini-3.1-pro-preview"
     assert calls[0]["key_pool"] is pool
@@ -126,12 +147,15 @@ def test_run_agent_routes_openai_direct_from_env(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-key")
     monkeypatch.setattr("brrragent.openai_direct.run_openai_agent", fake_openai_agent)
 
-    assert agent.run_agent(
-        system_prompt="system",
-        user_prompt="user",
-        model="openai/gpt-5.5:xhigh",
-        mcp=DummyMcp(),
-    ) == "ok"
+    assert (
+        agent.run_agent(
+            system_prompt="system",
+            user_prompt="user",
+            model="openai/gpt-5.5:xhigh",
+            mcp=DummyMcp(),
+        )
+        == "ok"
+    )
 
     assert calls[0]["model"] == "openai/gpt-5.5:xhigh"
     assert calls[0]["key_pool"].acquire() == "openai-key"
@@ -148,12 +172,15 @@ def test_run_agent_routes_codex_oauth_when_enabled(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY_PERSONAL", "openai-key")
     monkeypatch.setattr("brrragent.codex_oauth.run_codex_oauth_agent", fake_codex_agent)
 
-    assert agent.run_agent(
-        system_prompt="system",
-        user_prompt="user",
-        model="openai/gpt-5.5:xhigh",
-        mcp=DummyMcp(),
-    ) == "ok"
+    assert (
+        agent.run_agent(
+            system_prompt="system",
+            user_prompt="user",
+            model="openai/gpt-5.5:xhigh",
+            mcp=DummyMcp(),
+        )
+        == "ok"
+    )
 
     assert calls[0]["model"] == "openai/gpt-5.5:xhigh"
     assert calls[0]["system_prompt"] == "system"
@@ -171,12 +198,15 @@ def test_run_agent_routes_codex_prefix_without_env(monkeypatch):
     monkeypatch.delenv("BRRRAGENT_CODEX_OAUTH", raising=False)
     monkeypatch.setattr("brrragent.codex_oauth.run_codex_oauth_agent", fake_codex_agent)
 
-    assert agent.run_agent(
-        system_prompt="system",
-        user_prompt="user",
-        model="codex/gpt-5.4:xhigh",
-        mcp=DummyMcp(),
-    ) == "ok"
+    assert (
+        agent.run_agent(
+            system_prompt="system",
+            user_prompt="user",
+            model="codex/gpt-5.4:xhigh",
+            mcp=DummyMcp(),
+        )
+        == "ok"
+    )
 
     assert calls[0]["model"] == "codex/gpt-5.4:xhigh"
 
