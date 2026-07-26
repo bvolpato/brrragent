@@ -24,7 +24,8 @@ from pathlib import Path
 from typing import Callable, Optional
 from urllib import error, parse, request
 
-from brrragent.openai_direct import parse_openai_model, _to_responses_tool
+from brrragent.openai_direct import _to_responses_tool, parse_openai_model
+from brrragent.prompt_cache import AgentUsage, PromptCacheConfig, openai_usage
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +41,15 @@ User request:
 {user_prompt}
 
 Return the final answer only. Do not inspect files. Do not run commands."""
-_RETRYABLE_MARKERS = ("429", "500", "502", "503", "504", "timeout", "temporarily unavailable")
+_RETRYABLE_MARKERS = (
+    "429",
+    "500",
+    "502",
+    "503",
+    "504",
+    "timeout",
+    "temporarily unavailable",
+)
 
 
 def parse_codex_model(model: str) -> tuple[str, str | None]:
@@ -55,11 +64,15 @@ def _is_codex_spark_model(model: str) -> bool:
 
 
 def _auth_path() -> Path:
-    return Path(os.getenv("BRRRAGENT_OPENCODE_AUTH_PATH", DEFAULT_AUTH_PATH)).expanduser()
+    return Path(
+        os.getenv("BRRRAGENT_OPENCODE_AUTH_PATH", DEFAULT_AUTH_PATH)
+    ).expanduser()
 
 
 def _codex_timeout_seconds() -> int:
-    raw = os.getenv("BRRRAGENT_CODEX_TIMEOUT_SECONDS") or os.getenv("AI_CLIENT_TIMEOUT_SECONDS")
+    raw = os.getenv("BRRRAGENT_CODEX_TIMEOUT_SECONDS") or os.getenv(
+        "AI_CLIENT_TIMEOUT_SECONDS"
+    )
     try:
         return max(30, int(raw or "900"))
     except ValueError:
@@ -361,7 +374,9 @@ def _decode_jwt_payload(token: str) -> dict:
     try:
         payload = token.split(".")[1]
         padding = "=" * (-len(payload) % 4)
-        return json.loads(base64.urlsafe_b64decode((payload + padding).encode()).decode())
+        return json.loads(
+            base64.urlsafe_b64decode((payload + padding).encode()).decode()
+        )
     except Exception:
         return {}
 
@@ -403,7 +418,9 @@ def _refresh_access_token(openai_auth: dict) -> tuple[dict, str, str | None]:
             payload = json.loads(resp.read().decode())
     except error.HTTPError as exc:
         detail = exc.read().decode(errors="replace")[:500]
-        raise ValueError(f"Codex OAuth refresh failed: HTTP {exc.code}; {detail}") from exc
+        raise ValueError(
+            f"Codex OAuth refresh failed: HTTP {exc.code}; {detail}"
+        ) from exc
     except Exception as exc:
         raise ValueError(f"Codex OAuth refresh failed: {exc}") from exc
 
@@ -412,14 +429,15 @@ def _refresh_access_token(openai_auth: dict) -> tuple[dict, str, str | None]:
         raise ValueError("Codex OAuth refresh returned no access_token")
 
     try:
-        expires_ms = int(time.time() * 1000) + int(payload.get("expires_in") or 0) * 1000
+        expires_ms = (
+            int(time.time() * 1000) + int(payload.get("expires_in") or 0) * 1000
+        )
     except (TypeError, ValueError):
         expires_ms = int(time.time() * 1000) + 600_000
     claims = _decode_jwt_payload(access_token)
-    account_id = (
-        openai_auth.get("accountId")
-        or (claims.get("https://api.openai.com/auth") or {}).get("chatgpt_account_id")
-    )
+    account_id = openai_auth.get("accountId") or (
+        claims.get("https://api.openai.com/auth") or {}
+    ).get("chatgpt_account_id")
     refreshed_auth = {
         **openai_auth,
         "access": access_token,
@@ -456,6 +474,7 @@ def _codex_headers(
     *,
     model: str | None = None,
     request_identity: dict[str, str] | None = None,
+    session_id: str | None = None,
 ) -> dict[str, str]:
     if model and _is_codex_spark_model(model):
         identity = request_identity or _codex_request_identity(model) or {}
@@ -482,7 +501,7 @@ def _codex_headers(
         "Content-Type": "application/json",
         "originator": "opencode",
         "User-Agent": "opencode/brrragent",
-        "session_id": f"brrragent-{uuid.uuid4()}",
+        "session_id": session_id or f"brrragent-{uuid.uuid4()}",
     }
     if account_id:
         headers["ChatGPT-Account-Id"] = account_id
@@ -512,7 +531,9 @@ def _extract_function_calls(response_obj: dict | None) -> list[dict]:
     ]
 
 
-def _stream_codex_response(payload: dict, headers: dict[str, str], timeout: int = 900) -> dict:
+def _stream_codex_response(
+    payload: dict, headers: dict[str, str], timeout: int = 900
+) -> dict:
     req = request.Request(
         CODEX_RESPONSES_URL,
         data=json.dumps(payload).encode(),
@@ -565,6 +586,7 @@ def _stream_codex_response(payload: dict, headers: dict[str, str], timeout: int 
         "id": response_id,
         "text": final_text,
         "function_calls": _extract_function_calls(final_response),
+        "usage": openai_usage((final_response or {}).get("usage")),
     }
 
 
@@ -577,6 +599,7 @@ def _build_payload(
     response_schema: dict | None,
     previous_response_id: str | None = None,
     request_identity: dict[str, str] | None = None,
+    prompt_cache: PromptCacheConfig | None = None,
 ) -> dict:
     del previous_response_id
     bare_model, reasoning_effort = parse_codex_model(model)
@@ -597,10 +620,14 @@ def _build_payload(
             "thread_id": request_identity["thread_id"],
             "x-codex-window-id": request_identity["window_id"],
         }
+    if prompt_cache:
+        payload["prompt_cache_key"] = prompt_cache.key
     if _is_codex_spark_model(model):
-        payload["prompt_cache_key"] = os.getenv(
-            "BRRRAGENT_CODEX_SPARK_PROMPT_CACHE_KEY",
-            "brrragent-codex-spark",
+        payload.setdefault(
+            "prompt_cache_key",
+            os.getenv(
+                "BRRRAGENT_CODEX_SPARK_PROMPT_CACHE_KEY", "brrragent-codex-spark"
+            ),
         )
         if payload.get("reasoning"):
             payload["include"] = ["reasoning.encrypted_content"]
@@ -636,6 +663,8 @@ def run_codex_oauth_agent(
     max_retries: int,
     on_tool_call: Optional[Callable],
     response_schema: dict | None,
+    prompt_cache: PromptCacheConfig | None = None,
+    on_usage: Callable[[AgentUsage], None] | None = None,
 ) -> str:
     """Run the agent against ChatGPT/Codex Responses using OpenCode OAuth."""
     del temperature, max_tokens
@@ -643,7 +672,9 @@ def run_codex_oauth_agent(
     if _is_codex_spark_model(model):
         tools = mcp.get_openai_tools()
         if tools or extra_tools:
-            raise ValueError("codex/gpt-5.3-codex-spark CLI route does not support tools")
+            raise ValueError(
+                "codex/gpt-5.3-codex-spark CLI route does not support tools"
+            )
         return _run_codex_cli_spark_completion(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
@@ -659,17 +690,29 @@ def run_codex_oauth_agent(
         account_id,
         model=model,
         request_identity=request_identity,
+        session_id=(
+            f"brrragent-{uuid.uuid5(uuid.NAMESPACE_URL, prompt_cache.key)}"
+            if prompt_cache
+            else None
+        ),
     )
 
     tools = mcp.get_openai_tools()
     if extra_tools:
         tools.extend(extra_tools)
 
-    input_items = [{"role": "user", "content": [{"type": "input_text", "text": user_prompt}]}]
+    input_items = [
+        {"role": "user", "content": [{"type": "input_text", "text": user_prompt}]}
+    ]
 
     for turn in range(max_turns):
         bare_model, _ = parse_codex_model(model)
-        logger.info("[agent] Turn %d/%d - calling Codex OAuth %s", turn + 1, max_turns, bare_model)
+        logger.info(
+            "[agent] Turn %d/%d - calling Codex OAuth %s",
+            turn + 1,
+            max_turns,
+            bare_model,
+        )
 
         payload = _build_payload(
             model=model,
@@ -678,12 +721,15 @@ def run_codex_oauth_agent(
             tools=tools,
             response_schema=response_schema,
             request_identity=request_identity,
+            prompt_cache=prompt_cache,
         )
 
         last_err = None
         for attempt in range(1, max_retries + 1):
             try:
-                result = _stream_codex_response(payload, headers, timeout=_codex_timeout_seconds())
+                result = _stream_codex_response(
+                    payload, headers, timeout=_codex_timeout_seconds()
+                )
                 break
             except Exception as exc:
                 last_err = exc
@@ -697,12 +743,21 @@ def run_codex_oauth_agent(
                     raise
                 time.sleep(min(2**attempt, 30))
         else:
-            raise ValueError(f"Codex OAuth failed after {max_retries} retries: {last_err}")
+            raise ValueError(
+                f"Codex OAuth failed after {max_retries} retries: {last_err}"
+            )
+
+        if on_usage:
+            on_usage(result["usage"])
 
         function_calls = result.get("function_calls") or []
         if not function_calls:
             final_text = result.get("text", "")
-            logger.info("[agent] Final response after %d turn(s) (%d chars)", turn + 1, len(final_text))
+            logger.info(
+                "[agent] Final response after %d turn(s) (%d chars)",
+                turn + 1,
+                len(final_text),
+            )
             return final_text
 
         logger.info("[agent] Turn %d: %d tool call(s)", turn + 1, len(function_calls))
@@ -751,14 +806,22 @@ def run_codex_oauth_agent(
         tools=[],
         response_schema=response_schema,
         request_identity=request_identity,
+        prompt_cache=prompt_cache,
     )
 
     last_err = None
     for attempt in range(1, max_retries + 1):
         try:
-            result = _stream_codex_response(payload, headers, timeout=_codex_timeout_seconds())
+            result = _stream_codex_response(
+                payload, headers, timeout=_codex_timeout_seconds()
+            )
+            if on_usage:
+                on_usage(result["usage"])
             final_text = result.get("text", "")
-            logger.info("[agent] Final no-tool response after max_turns (%d chars)", len(final_text))
+            logger.info(
+                "[agent] Final no-tool response after max_turns (%d chars)",
+                len(final_text),
+            )
             return final_text or "[No final response after max tool turns]"
         except Exception as exc:
             last_err = exc
@@ -772,4 +835,6 @@ def run_codex_oauth_agent(
                 raise
             time.sleep(min(2**attempt, 30))
 
-    raise ValueError(f"Codex OAuth final synthesis failed after {max_retries} retries: {last_err}")
+    raise ValueError(
+        f"Codex OAuth final synthesis failed after {max_retries} retries: {last_err}"
+    )
