@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import platform
+import re
 import shutil
 import subprocess
 import tempfile
@@ -27,6 +28,8 @@ TOKEN_URL = "https://auth.openai.com/oauth/token"
 CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses"
 DEFAULT_AUTH_PATH = "~/.cache/brrragent/codex-auth.json"
 DEFAULT_CODEX_HOME = "~/.cache/brrragent/codex-home"
+DEFAULT_PROFILE_ROOT = "~/.cache/brrragent/profiles"
+PROFILE_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 CODEX_SPARK_MODEL = "gpt-5.3-codex-spark"
 CODEX_CLI_ORIGINATOR = "codex_cli_rs"
 CODEX_CLI_PROMPT = """{system_prompt}
@@ -62,7 +65,12 @@ def _auth_path() -> Path:
         os.getenv("BRRRAGENT_AUTH_PATH", "").strip()
         or os.getenv("BRRRAGENT_OPENCODE_AUTH_PATH", "").strip()
     )
-    return Path(configured or DEFAULT_AUTH_PATH).expanduser()
+    if configured:
+        return Path(configured).expanduser()
+    profile = _configured_profile()
+    if profile:
+        return _profile_paths(profile)[0]
+    return Path(DEFAULT_AUTH_PATH).expanduser()
 
 
 def _codex_timeout_seconds() -> int:
@@ -79,12 +87,37 @@ def _auth_lock_path(path: Path) -> Path:
     return path.with_name(f"{path.name}.brrragent.lock")
 
 
+def _validate_profile_name(profile: str) -> str:
+    profile = profile.strip()
+    if not PROFILE_NAME_PATTERN.fullmatch(profile):
+        raise ValueError(
+            "Profile must contain 1-64 letters, numbers, dots, underscores, or hyphens"
+        )
+    return profile
+
+
+def _configured_profile() -> str | None:
+    profile = os.getenv("BRRRAGENT_PROFILE", "").strip()
+    return _validate_profile_name(profile) if profile else None
+
+
+def _profile_paths(profile: str) -> tuple[Path, Path]:
+    profile = _validate_profile_name(profile)
+    configured_root = os.getenv("BRRRAGENT_PROFILE_ROOT", "").strip()
+    root = Path(configured_root or DEFAULT_PROFILE_ROOT).expanduser()
+    profile_root = root / profile
+    return profile_root / "codex-auth.json", profile_root / "codex-home"
+
+
 def _codex_home() -> Path:
-    configured = (
-        os.getenv("BRRRAGENT_CODEX_HOME", "").strip()
-        or os.getenv("CODEX_HOME", "").strip()
-    )
-    return Path(configured or DEFAULT_CODEX_HOME).expanduser()
+    configured = os.getenv("BRRRAGENT_CODEX_HOME", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    profile = _configured_profile()
+    if profile:
+        return _profile_paths(profile)[1]
+    legacy_home = os.getenv("CODEX_HOME", "").strip()
+    return Path(legacy_home or DEFAULT_CODEX_HOME).expanduser()
 
 
 def _codex_cli_auth_path() -> Path:

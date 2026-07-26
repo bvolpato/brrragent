@@ -69,6 +69,20 @@ Override locations with `BRRRAGENT_AUTH_PATH`, `BRRRAGENT_CODEX_HOME`, or
 command flags. Existing callers can still use `BRRRAGENT_OPENCODE_AUTH_PATH`
 and explicit `CODEX_HOME` values.
 
+Use one independently issued profile per application or worker group to avoid
+refresh-token rotation conflicts:
+
+```bash
+uv run brrragent-auth login --profile insta-ai-bruna
+BRRRAGENT_PROFILE=insta-ai-bruna uv run your-application
+```
+
+Named profiles live under `~/.cache/brrragent/profiles/<profile>/`. Run device
+login separately for every profile; copying an auth file also copies its
+rotating refresh token and does not provide isolation. `BRRRAGENT_PROFILE_ROOT`
+can move the profile directory. A named profile also takes precedence over a
+generic `CODEX_HOME` value.
+
 ## Prompt caching
 
 Keep reusable tools and system instructions before request-specific content.

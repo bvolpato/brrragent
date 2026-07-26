@@ -86,3 +86,39 @@ def test_login_rejects_overlapping_auth_paths(tmp_path):
                 str(codex_home),
             ]
         )
+
+
+def test_login_writes_named_profile(monkeypatch, tmp_path):
+    monkeypatch.setenv("BRRRAGENT_PROFILE_ROOT", str(tmp_path / "profiles"))
+    tokens = {
+        "id_token": _jwt({"chatgpt_account_id": "acct_profile"}),
+        "access_token": "access_profile",
+        "refresh_token": "refresh_profile",
+    }
+    monkeypatch.setattr(
+        auth_cli,
+        "_request_device_code",
+        lambda: {"device_auth_id": "device", "user_code": "PROFILE-CODE"},
+    )
+    monkeypatch.setattr(
+        auth_cli,
+        "_poll_device_authorization",
+        lambda device, timeout: {
+            "authorization_code": "authorization",
+            "code_verifier": "verifier",
+        },
+    )
+    monkeypatch.setattr(auth_cli, "_exchange_tokens", lambda authorization: tokens)
+
+    assert auth_cli.main(["login", "--profile", "insta-ai-bruna"]) == 0
+
+    profile_root = tmp_path / "profiles/insta-ai-bruna"
+    direct = json.loads((profile_root / "codex-auth.json").read_text())
+    cli = json.loads((profile_root / "codex-home/auth.json").read_text())
+    assert direct["openai"]["refresh"] == "refresh_profile"
+    assert cli["tokens"]["refresh_token"] == "refresh_profile"
+
+
+def test_login_rejects_invalid_profile_name():
+    with pytest.raises(SystemExit, match="2"):
+        auth_cli.main(["login", "--profile", "../shared"])

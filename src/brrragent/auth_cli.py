@@ -12,7 +12,12 @@ from pathlib import Path
 from typing import Any
 from urllib import error, parse, request
 
-from brrragent.codex_oauth import CLIENT_ID, _auth_path, _codex_cli_auth_path
+from brrragent.codex_oauth import (
+    CLIENT_ID,
+    _auth_path,
+    _codex_cli_auth_path,
+    _profile_paths,
+)
 
 ISSUER = "https://auth.openai.com"
 DEVICE_URL = f"{ISSUER}/codex/device"
@@ -217,6 +222,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     login = subparsers.add_parser("login", help="Authenticate with Codex device login")
+    login.add_argument(
+        "--profile",
+        help="Named credential profile, such as insta-ai-bruna",
+    )
     login.add_argument("--auth-file", type=Path, help="Direct OAuth output path")
     login.add_argument("--codex-home", type=Path, help="Codex CLI home directory")
     login.add_argument(
@@ -225,13 +234,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.timeout <= 0:
         parser.error("--timeout must be positive")
+    if args.profile and (args.auth_file or args.codex_home):
+        parser.error("--profile cannot be combined with explicit output paths")
 
-    direct_path = (args.auth_file or _auth_path()).expanduser()
-    cli_path = (
-        args.codex_home.expanduser() / "auth.json"
-        if args.codex_home
-        else _codex_cli_auth_path()
-    )
+    try:
+        if args.profile:
+            direct_path, codex_home = _profile_paths(args.profile)
+            cli_path = codex_home / "auth.json"
+        else:
+            direct_path = (args.auth_file or _auth_path()).expanduser()
+            cli_path = (
+                args.codex_home.expanduser() / "auth.json"
+                if args.codex_home
+                else _codex_cli_auth_path()
+            )
+    except ValueError as exc:
+        parser.error(str(exc))
     if direct_path.resolve() == cli_path.resolve():
         parser.error("--auth-file must differ from Codex CLI auth path")
 
