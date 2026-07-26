@@ -8,11 +8,31 @@ pool evicts it and the agent retries with a fresh key.
 import json
 import logging
 import time
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from brrragent.keys import KeyPool
+from brrragent.prompt_cache import AgentUsage, PromptCacheConfig, openai_usage
 
 logger = logging.getLogger(__name__)
+
+
+def _system_content(
+    system_prompt: str,
+    model: str,
+    prompt_cache: PromptCacheConfig | None,
+):
+    if not prompt_cache or not model.startswith("anthropic/"):
+        return system_prompt
+    cache_control = {"type": "ephemeral"}
+    if prompt_cache.ttl == "1h":
+        cache_control["ttl"] = "1h"
+    return [
+        {
+            "type": "text",
+            "text": system_prompt,
+            "cache_control": cache_control,
+        }
+    ]
 
 
 def _is_rate_limit_error(err: Exception) -> bool:
@@ -35,9 +55,11 @@ def run_openrouter_agent(
     temperature: float,
     max_tokens: int,
     max_retries: int,
-    on_tool_call: Optional[Callable],
+    on_tool_call: Callable | None,
     response_schema: dict | None,
     reasoning_effort: str | None = None,
+    prompt_cache: PromptCacheConfig | None = None,
+    on_usage: Callable[[AgentUsage], None] | None = None,
 ) -> str:
     """Run the agent using an OpenAI-compatible API (OpenRouter, OpenAI, etc.).
 
@@ -64,7 +86,10 @@ def run_openrouter_agent(
         tools.extend(extra_tools)
 
     messages = [
-        {"role": "system", "content": system_prompt},
+        {
+            "role": "system",
+            "content": _system_content(system_prompt, model, prompt_cache),
+        },
         {"role": "user", "content": user_prompt},
     ]
 
@@ -80,7 +105,9 @@ def run_openrouter_agent(
         }
 
     for turn in range(max_turns):
-        logger.info("[agent] Turn %d/%d — calling %s (%s)", turn + 1, max_turns, model, base_url)
+        logger.info(
+            "[agent] Turn %d/%d — calling %s (%s)", turn + 1, max_turns, model, base_url
+        )
 
         result = _call_with_retry(
             client=client,
@@ -95,6 +122,7 @@ def run_openrouter_agent(
             current_key=selected_key,
             base_url=base_url,
             reasoning_effort=reasoning_effort,
+            prompt_cache=prompt_cache,
         )
 
         # Unpack pool rotation if applicable
@@ -111,12 +139,17 @@ def run_openrouter_agent(
         else:
             response = result
 
+        if on_usage and getattr(response, "usage", None):
+            on_usage(openai_usage(response.usage))
+
         choice = response.choices[0]
         message = choice.message
         messages.append(message.model_dump())
 
         if message.tool_calls:
-            logger.info("[agent] Turn %d: %d tool call(s)", turn + 1, len(message.tool_calls))
+            logger.info(
+                "[agent] Turn %d: %d tool call(s)", turn + 1, len(message.tool_calls)
+            )
 
             for tool_call in message.tool_calls:
                 fn_name = tool_call.function.name
@@ -130,14 +163,20 @@ def run_openrouter_agent(
                     on_tool_call(fn_name, fn_args)
 
                 result_text = mcp.call_tool(fn_name, fn_args)
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": result_text,
-                })
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": result_text,
+                    }
+                )
         else:
             final_text = message.content or ""
-            logger.info("[agent] Final response after %d turn(s) (%d chars)", turn + 1, len(final_text))
+            logger.info(
+                "[agent] Final response after %d turn(s) (%d chars)",
+                turn + 1,
+                len(final_text),
+            )
             return final_text
 
         if choice.finish_reason == "stop":
@@ -164,6 +203,7 @@ def _call_with_retry(
     current_key: str = "",
     base_url: str = "",
     reasoning_effort: str | None = None,
+    prompt_cache: PromptCacheConfig | None = None,
 ):
     """Call the OpenAI-compatible API with exponential backoff on transient errors.
 
@@ -193,6 +233,11 @@ def _call_with_retry(
                 kwargs["max_tokens"] = max_tokens
             if response_format:
                 kwargs["response_format"] = response_format
+            if prompt_cache and base_url.rstrip("/") == "https://openrouter.ai/api/v1":
+                kwargs["extra_body"] = {
+                    "prompt_cache_key": prompt_cache.key,
+                    "session_id": prompt_cache.key,
+                }
             resp = client.chat.completions.create(**kwargs)
             if key_pool:
                 return (resp, current_key)
@@ -204,7 +249,10 @@ def _call_with_retry(
             if _is_rate_limit_error(e) and key_pool:
                 logger.warning(
                     "[agent] OpenRouter 429 on key ...%s (attempt %d/%d): %s",
-                    current_key[-6:], attempt, max_retries, str(e)[:200],
+                    current_key[-6:],
+                    attempt,
+                    max_retries,
+                    str(e)[:200],
                 )
                 key_pool.report_rate_limit(current_key)
                 current_key = key_pool.acquire()
@@ -214,7 +262,10 @@ def _call_with_retry(
                     timeout=120.0,
                     default_headers={"X-Title": "brrragent"},
                 )
-                logger.info("[agent] Rotated to key ...%s, retrying immediately", current_key[-6:])
+                logger.info(
+                    "[agent] Rotated to key ...%s, retrying immediately",
+                    current_key[-6:],
+                )
                 continue
 
             is_transient = any(
@@ -222,10 +273,15 @@ def _call_with_retry(
                 for p in ("500", "503", "429", "unavailable", "overloaded", "rate")
             )
 
-            logger.warning("[agent] API call attempt %d/%d failed: %s", attempt, max_retries, str(e)[:200])
+            logger.warning(
+                "[agent] API call attempt %d/%d failed: %s",
+                attempt,
+                max_retries,
+                str(e)[:200],
+            )
 
             if is_transient and attempt < max_retries:
-                wait = min(2 ** attempt, 30)
+                wait = min(2**attempt, 30)
                 logger.info("[agent] Transient error, retrying in %ds...", wait)
                 time.sleep(wait)
             elif not is_transient:

@@ -42,6 +42,7 @@ from collections.abc import Callable
 
 from brrragent.keys import KeyPool
 from brrragent.mcp_tools import McpToolCaller
+from brrragent.prompt_cache import AgentUsage, PromptCacheConfig
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +152,8 @@ def run_agent(
     max_retries: int = 3,
     on_tool_call: Callable | None = None,
     response_schema: dict | None = None,
+    prompt_cache: PromptCacheConfig | None = None,
+    on_usage: Callable[[AgentUsage], None] | None = None,
 ) -> str:
     """
     Run an agentic react loop with tool calling.
@@ -185,6 +188,8 @@ def run_agent(
         max_retries: Retries per API call on transient errors.
         on_tool_call: Optional callback(tool_name, tool_args) for logging/UI.
         response_schema: JSON Schema dict for structured output (optional).
+        prompt_cache: Stable cache key and requested TTL for this prompt version.
+        on_usage: Optional callback invoked with provider token and cache usage.
 
     Returns:
         The model's final text response.
@@ -248,6 +253,8 @@ def run_agent(
             max_retries=max_retries,
             on_tool_call=on_tool_call,
             response_schema=response_schema,
+            prompt_cache=prompt_cache,
+            on_usage=on_usage,
         )
 
     if use_codex_oauth:
@@ -266,6 +273,8 @@ def run_agent(
             max_retries=max_retries,
             on_tool_call=on_tool_call,
             response_schema=response_schema,
+            prompt_cache=prompt_cache,
+            on_usage=on_usage,
         )
 
     if use_openai_direct:
@@ -289,6 +298,8 @@ def run_agent(
             max_retries=max_retries,
             on_tool_call=on_tool_call,
             response_schema=response_schema,
+            prompt_cache=prompt_cache,
+            on_usage=on_usage,
         )
 
     # Check for native provider routing (fireworks/, minimax/, etc.)
@@ -323,6 +334,8 @@ def run_agent(
             on_tool_call=on_tool_call,
             response_schema=response_schema,
             reasoning_effort=reasoning_effort,
+            prompt_cache=None,
+            on_usage=on_usage,
         )
 
     # Fallback: OpenRouter
@@ -356,4 +369,6 @@ def run_agent(
         max_retries=max_retries,
         on_tool_call=on_tool_call,
         response_schema=response_schema,
+        prompt_cache=prompt_cache,
+        on_usage=on_usage,
     )

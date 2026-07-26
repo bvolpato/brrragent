@@ -21,11 +21,14 @@ Backends (importable individually):
 from brrragent.agent import run_agent
 from brrragent.keys import KeyPool, RateLimitExhausted, pick_env_key, pick_key
 from brrragent.mcp_tools import McpServerConfig, McpToolCaller, get_default_caller
+from brrragent.prompt_cache import AgentUsage, PromptCacheConfig
 
 __all__ = [
+    "AgentUsage",
     "KeyPool",
     "McpServerConfig",
     "McpToolCaller",
+    "PromptCacheConfig",
     "RateLimitExhausted",
     "get_default_caller",
     "pick_env_key",

@@ -52,6 +52,23 @@ print(result)
 Provider credentials are read from the caller's environment. Common variables
 are `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, and `GEMINI_API_KEY`.
 
+## Prompt caching
+
+Keep reusable tools and system instructions before request-specific content.
+Use one versioned key per stable prompt without user IDs, timestamps, URLs, or
+prompt text:
+
+```python
+from brrragent import PromptCacheConfig
+
+cache = PromptCacheConfig(key="workflow:v2", ttl="1h")
+```
+
+Pass `prompt_cache=cache` to `run_agent`. brrragent maps it to supported cache
+keys, explicit breakpoints, provider affinity, and Anthropic cache controls.
+Gemini uses its stable system-first prefix for implicit caching. An optional
+`on_usage` callback receives normalized token and cache usage for each request.
+
 ## MCP servers
 
 One caller can combine multiple endpoints:
@@ -107,9 +124,11 @@ Tool filters accept exact names and case-sensitive shell patterns such as
 
 ```python
 from brrragent import (
+    AgentUsage,
     KeyPool,
     McpServerConfig,
     McpToolCaller,
+    PromptCacheConfig,
     RateLimitExhausted,
     get_default_caller,
     pick_env_key,

@@ -10,9 +10,10 @@ pool evicts it and the agent retries with a fresh key.
 
 import logging
 import time
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from brrragent.keys import KeyPool
+from brrragent.prompt_cache import AgentUsage, PromptCacheConfig, gemini_usage
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +36,10 @@ def run_gemini_agent(
     temperature: float,
     max_tokens: int,
     max_retries: int,
-    on_tool_call: Optional[Callable],
+    on_tool_call: Callable | None,
     response_schema: dict | None,
+    prompt_cache: PromptCacheConfig | None = None,
+    on_usage: Callable[[AgentUsage], None] | None = None,
 ) -> str:
     """Run the agent using the Google genai SDK directly (no OpenRouter).
 
@@ -48,7 +51,9 @@ def run_gemini_agent(
         from google import genai
         from google.genai import types as gt
     except ImportError as e:
-        raise ImportError("google-genai required for Gemini direct: pip install google-genai") from e
+        raise ImportError(
+            "google-genai required for Gemini direct: pip install google-genai"
+        ) from e
 
     if key_pool is None and api_key is None:
         raise ValueError("Either api_key or key_pool must be provided")
@@ -60,6 +65,8 @@ def run_gemini_agent(
     contents: list[gt.Content] = [
         gt.Content(role="user", parts=[gt.Part(text=user_prompt)])
     ]
+
+    del prompt_cache  # Gemini implicit caching uses the stable system/user prefix.
 
     config_kwargs = dict(
         system_instruction=system_prompt,
@@ -75,7 +82,12 @@ def run_gemini_agent(
     config = gt.GenerateContentConfig(**config_kwargs)
 
     for turn in range(max_turns):
-        logger.info("[agent] Turn %d/%d — calling %s (gemini direct)", turn + 1, max_turns, model)
+        logger.info(
+            "[agent] Turn %d/%d — calling %s (gemini direct)",
+            turn + 1,
+            max_turns,
+            model,
+        )
 
         response = _call_with_retry(
             client=client,
@@ -94,6 +106,9 @@ def run_gemini_agent(
                 selected_key = new_key
                 client = genai.Client(api_key=selected_key)
 
+        if on_usage and getattr(response, "usage_metadata", None):
+            on_usage(gemini_usage(response.usage_metadata))
+
         candidate = response.candidates[0] if response.candidates else None
         if not candidate:
             break
@@ -105,7 +120,11 @@ def run_gemini_agent(
         if not fn_calls:
             text_parts = [p.text for p in model_parts if p.text]
             final_text = "\n".join(text_parts)
-            logger.info("[agent] Final response after %d turn(s) (%d chars)", turn + 1, len(final_text))
+            logger.info(
+                "[agent] Final response after %d turn(s) (%d chars)",
+                turn + 1,
+                len(final_text),
+            )
             return final_text
 
         contents.append(gt.Content(role="model", parts=model_parts))
@@ -173,26 +192,46 @@ def _call_with_retry(
             if _is_rate_limit_error(e) and key_pool:
                 logger.warning(
                     "[agent] Gemini 429 on key ...%s (attempt %d/%d): %s",
-                    current_key[-6:], attempt, max_retries, err_str[:200],
+                    current_key[-6:],
+                    attempt,
+                    max_retries,
+                    err_str[:200],
                 )
                 # Evict and get a new key — may raise RateLimitExhausted
                 key_pool.report_rate_limit(current_key)
                 current_key = key_pool.acquire()
 
                 from google import genai
+
                 client = genai.Client(api_key=current_key)
-                logger.info("[agent] Rotated to key ...%s, retrying immediately", current_key[-6:])
+                logger.info(
+                    "[agent] Rotated to key ...%s, retrying immediately",
+                    current_key[-6:],
+                )
                 continue
 
             is_transient = any(
                 p in err_str
-                for p in ("500", "503", "429", "UNAVAILABLE", "INTERNAL", "overloaded", "rate")
+                for p in (
+                    "500",
+                    "503",
+                    "429",
+                    "UNAVAILABLE",
+                    "INTERNAL",
+                    "overloaded",
+                    "rate",
+                )
             )
 
-            logger.warning("[agent] Gemini call attempt %d/%d failed: %s", attempt, max_retries, err_str[:200])
+            logger.warning(
+                "[agent] Gemini call attempt %d/%d failed: %s",
+                attempt,
+                max_retries,
+                err_str[:200],
+            )
 
             if is_transient and attempt < max_retries:
-                wait = min(2 ** attempt, 30)
+                wait = min(2**attempt, 30)
                 logger.info("[agent] Transient error, retrying in %ds...", wait)
                 time.sleep(wait)
             elif not is_transient:

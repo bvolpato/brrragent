@@ -3,6 +3,7 @@ import subprocess
 
 import pytest
 
+from brrragent import PromptCacheConfig
 from brrragent.codex_oauth import (
     _build_payload,
     _codex_cli_config_args,
@@ -30,6 +31,21 @@ def test_codex_spark_detection_is_codex_prefix_guarded():
     assert _is_codex_spark_model("codex/gpt-5.3-codex-spark:xhigh")
     assert not _is_codex_spark_model("openai/gpt-5.3-codex-spark:xhigh")
     assert not _is_codex_spark_model("codex/gpt-5.4:xhigh")
+
+
+def test_build_payload_sets_stable_cache_key():
+    payload = _build_payload(
+        model="codex/gpt-5.6-luna:medium",
+        instructions="stable system",
+        input_items=[{"role": "user", "content": "dynamic"}],
+        tools=[],
+        response_schema=None,
+        prompt_cache=PromptCacheConfig("workflow:v2"),
+    )
+
+    assert payload["prompt_cache_key"] == "workflow:v2"
+    assert payload["instructions"] == "stable system"
+    assert payload["input"] == [{"role": "user", "content": "dynamic"}]
 
 
 def test_codex_cli_config_args_maps_reasoning_effort():
@@ -292,6 +308,17 @@ def test_codex_headers_keep_existing_opencode_envelope_for_regular_models():
     assert headers["ChatGPT-Account-Id"] == "acct_1"
     assert "session_id" in headers
     assert "session-id" not in headers
+
+
+def test_codex_headers_accept_stable_cache_session():
+    headers = _codex_headers(
+        "access",
+        "account",
+        model="codex/gpt-5.6-luna:medium",
+        session_id="brrragent-stable",
+    )
+
+    assert headers["session_id"] == "brrragent-stable"
 
 
 def test_codex_headers_match_cli_envelope_for_spark(monkeypatch):

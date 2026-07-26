@@ -8,10 +8,72 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev --locked --python 3.12
+
+      - name: Verify lockfile
+        run: uv lock --check
+
+      - name: Lint
+        run: uv run ruff check src tests
+
+      - name: Check formatting
+        run: uv run ruff format --check src tests
+
+      - name: Compile package
+        run: uv run python -m compileall -q src tests
+
+      - name: Build distributions
+        run: uv build --clear
+
+      - name: Validate distributions
+        run: |
+          uv run twine check dist/*
+          uv run check-wheel-contents dist/*.whl
+
+      - name: Smoke test built distributions
+        run: |
+          set -euo pipefail
+          wheel=$(find dist -maxdepth 1 -name '*.whl' -print -quit)
+          sdist=$(find dist -maxdepth 1 -name '*.tar.gz' -print -quit)
+          wheel_env=$(mktemp -d)
+          sdist_env=$(mktemp -d)
+          uv venv "$wheel_env"
+          uv venv "$sdist_env"
+          uv pip install --python "$wheel_env/bin/python" "${wheel}[gemini]"
+          uv pip install --python "$sdist_env/bin/python" "${sdist}[gemini]"
+          "$wheel_env/bin/python" -c "from brrragent import PromptCacheConfig, run_agent; import brrragent.gemini"
+          "$sdist_env/bin/python" -c "from brrragent import PromptCacheConfig, run_agent; import brrragent.gemini"
+
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -19,10 +81,12 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6.0.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
@@ -34,23 +98,20 @@ jobs:
         run: uv sync --all-extras --dev --locked --python ${{ matrix.python-version }}
 
       - name: Run tests
-        run: uv run pytest
-
-      - name: Compile package
-        run: uv run python -m compileall src tests
-
-      - name: Build package
-        run: uv build
+        run: uv run pytest -q --cov=brrragent --cov-report=term-missing
 
   minimum-openai:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6.0.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
@@ -65,4 +126,36 @@ jobs:
         run: uv pip install "openai==1.66.0"
 
       - name: Run tests with minimum OpenAI SDK
-        run: uv run --no-sync pytest
+        run: uv run --no-sync pytest -q
+
+  gitleaks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Scan for secrets
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  dependency-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: moderate
