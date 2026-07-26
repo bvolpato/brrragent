@@ -110,9 +110,9 @@ def test_login_writes_named_profile(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(auth_cli, "_exchange_tokens", lambda authorization: tokens)
 
-    assert auth_cli.main(["login", "--profile", "insta-ai-bruna"]) == 0
+    assert auth_cli.main(["login", "--profile", "content-worker"]) == 0
 
-    profile_root = tmp_path / "profiles/insta-ai-bruna"
+    profile_root = tmp_path / "profiles/content-worker"
     direct = json.loads((profile_root / "codex-auth.json").read_text())
     cli = json.loads((profile_root / "codex-home/auth.json").read_text())
     assert direct["openai"]["refresh"] == "refresh_profile"

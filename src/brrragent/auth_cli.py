@@ -224,7 +224,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     login = subparsers.add_parser("login", help="Authenticate with Codex device login")
     login.add_argument(
         "--profile",
-        help="Named credential profile, such as insta-ai-bruna",
+        help="Named credential profile, such as content-worker",
     )
     login.add_argument("--auth-file", type=Path, help="Direct OAuth output path")
     login.add_argument("--codex-home", type=Path, help="Codex CLI home directory")

@@ -73,9 +73,27 @@ Use one independently issued profile per application or worker group to avoid
 refresh-token rotation conflicts:
 
 ```bash
-uv run brrragent-auth login --profile insta-ai-bruna
-BRRRAGENT_PROFILE=insta-ai-bruna uv run your-application
+uv run brrragent-auth login --profile content-worker
+BRRRAGENT_PROFILE=content-worker uv run your-application
 ```
+
+Prefer per-call selection when one process handles multiple use cases:
+
+```python
+from brrragent import CodexAuthConfig, run_agent
+
+result = run_agent(
+    system_prompt="Return a concise answer.",
+    user_prompt="Summarize this input.",
+    model="codex/gpt-5.6-luna:medium",
+    codex_auth=CodexAuthConfig(profile="content-worker"),
+)
+```
+
+Explicit paths are also supported with
+`CodexAuthConfig(auth_path="...", codex_home="...")`. Per-call selection is
+context-local, so concurrent use cases do not need to mutate process-wide
+environment variables.
 
 Named profiles live under `~/.cache/brrragent/profiles/<profile>/`. Run device
 login separately for every profile; copying an auth file also copies its

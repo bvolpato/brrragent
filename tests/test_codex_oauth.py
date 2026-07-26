@@ -5,6 +5,7 @@ import pytest
 
 from brrragent import PromptCacheConfig
 from brrragent.codex_oauth import (
+    CodexAuthConfig,
     _auth_path,
     _build_payload,
     _codex_cli_auth_path,
@@ -18,6 +19,7 @@ from brrragent.codex_oauth import (
     _parse_codex_cli_jsonl,
     _run_codex_cli_spark_completion,
     _sync_codex_cli_auth,
+    codex_auth_context,
     has_opencode_oauth,
     parse_codex_model,
     run_codex_oauth_agent,
@@ -54,7 +56,7 @@ def test_auth_paths_preserve_explicit_legacy_overrides(monkeypatch, tmp_path):
 
 def test_named_profile_resolves_isolated_paths(monkeypatch, tmp_path):
     profile_root = tmp_path / "profiles"
-    monkeypatch.setenv("BRRRAGENT_PROFILE", "insta-ai-bruna")
+    monkeypatch.setenv("BRRRAGENT_PROFILE", "content-worker")
     monkeypatch.setenv("BRRRAGENT_PROFILE_ROOT", str(profile_root))
     for name in (
         "BRRRAGENT_AUTH_PATH",
@@ -64,9 +66,9 @@ def test_named_profile_resolves_isolated_paths(monkeypatch, tmp_path):
     ):
         monkeypatch.delenv(name, raising=False)
 
-    assert _auth_path() == profile_root / "insta-ai-bruna/codex-auth.json"
+    assert _auth_path() == profile_root / "content-worker/codex-auth.json"
     assert _codex_cli_auth_path() == (
-        profile_root / "insta-ai-bruna/codex-home/auth.json"
+        profile_root / "content-worker/codex-home/auth.json"
     )
 
 
@@ -83,13 +85,13 @@ def test_explicit_paths_override_named_profile(monkeypatch, tmp_path):
 
 def test_named_profile_overrides_generic_codex_home(monkeypatch, tmp_path):
     profile_root = tmp_path / "profiles"
-    monkeypatch.setenv("BRRRAGENT_PROFILE", "insta-ai-bruna")
+    monkeypatch.setenv("BRRRAGENT_PROFILE", "content-worker")
     monkeypatch.setenv("BRRRAGENT_PROFILE_ROOT", str(profile_root))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "shared-codex-home"))
     monkeypatch.delenv("BRRRAGENT_CODEX_HOME", raising=False)
 
     assert _codex_cli_auth_path() == (
-        profile_root / "insta-ai-bruna/codex-home/auth.json"
+        profile_root / "content-worker/codex-home/auth.json"
     )
 
 
@@ -98,6 +100,31 @@ def test_named_profile_rejects_path_traversal(monkeypatch):
 
     with pytest.raises(ValueError, match="Profile must contain"):
         _auth_path()
+
+
+def test_per_call_auth_paths_override_environment(monkeypatch, tmp_path):
+    auth_path = tmp_path / "request/auth.json"
+    codex_home = tmp_path / "request/codex-home"
+    monkeypatch.setenv("BRRRAGENT_PROFILE", "environment-profile")
+
+    with codex_auth_context(
+        CodexAuthConfig(auth_path=auth_path, codex_home=codex_home)
+    ):
+        assert _auth_path() == auth_path
+        assert _codex_cli_auth_path() == codex_home / "auth.json"
+
+    assert "environment-profile" in str(_auth_path())
+
+
+def test_codex_auth_config_rejects_ambiguous_selection(tmp_path):
+    with pytest.raises(ValueError, match="requires a profile"):
+        CodexAuthConfig()
+
+    with pytest.raises(ValueError, match="cannot be combined"):
+        CodexAuthConfig(profile="content-worker", auth_path=tmp_path / "auth.json")
+
+    with pytest.raises(ValueError, match="must be provided together"):
+        CodexAuthConfig(auth_path=tmp_path / "auth.json")
 
 
 def test_parse_codex_model_strips_prefix_and_reasoning_suffix():

@@ -39,10 +39,14 @@ Usage:
 import logging
 import os
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from brrragent.keys import KeyPool
 from brrragent.mcp_tools import McpToolCaller
 from brrragent.prompt_cache import AgentUsage, PromptCacheConfig
+
+if TYPE_CHECKING:
+    from brrragent.codex_oauth import CodexAuthConfig
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +158,7 @@ def run_agent(
     response_schema: dict | None = None,
     prompt_cache: PromptCacheConfig | None = None,
     on_usage: Callable[[AgentUsage], None] | None = None,
+    codex_auth: "CodexAuthConfig | None" = None,
 ) -> str:
     """
     Run an agentic react loop with tool calling.
@@ -190,6 +195,7 @@ def run_agent(
         response_schema: JSON Schema dict for structured output (optional).
         prompt_cache: Stable cache key and requested TTL for this prompt version.
         on_usage: Optional callback invoked with provider token and cache usage.
+        codex_auth: Per-call Codex credential profile or explicit file paths.
 
     Returns:
         The model's final text response.
@@ -258,24 +264,28 @@ def run_agent(
         )
 
     if use_codex_oauth:
-        from brrragent.codex_oauth import run_codex_oauth_agent
+        from brrragent.codex_oauth import codex_auth_context, run_codex_oauth_agent
 
         logger.info("[agent] Using Codex OAuth (model=%s)", model)
-        return run_codex_oauth_agent(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            model=model,
-            mcp=mcp,
-            extra_tools=extra_tools,
-            max_turns=max_turns,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            max_retries=max_retries,
-            on_tool_call=on_tool_call,
-            response_schema=response_schema,
-            prompt_cache=prompt_cache,
-            on_usage=on_usage,
-        )
+        kwargs = {
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+            "model": model,
+            "mcp": mcp,
+            "extra_tools": extra_tools,
+            "max_turns": max_turns,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "max_retries": max_retries,
+            "on_tool_call": on_tool_call,
+            "response_schema": response_schema,
+            "prompt_cache": prompt_cache,
+            "on_usage": on_usage,
+        }
+        if codex_auth is None:
+            return run_codex_oauth_agent(**kwargs)
+        with codex_auth_context(codex_auth):
+            return run_codex_oauth_agent(**kwargs)
 
     if use_openai_direct:
         from brrragent.openai_direct import run_openai_agent
