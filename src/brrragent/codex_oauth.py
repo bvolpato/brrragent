@@ -69,6 +69,11 @@ class CodexAuthConfig:
                 raise ValueError("Codex auth profile cannot be combined with paths")
         elif (self.auth_path is None) != (self.codex_home is None):
             raise ValueError("Codex auth_path and codex_home must be provided together")
+        elif self.auth_path is not None and (
+            Path(self.auth_path).expanduser().resolve()
+            == (Path(self.codex_home).expanduser() / "auth.json").resolve()
+        ):
+            raise ValueError("Codex direct and CLI auth paths must differ")
 
 
 _ACTIVE_AUTH_CONFIG: ContextVar[CodexAuthConfig | None] = ContextVar(
@@ -127,6 +132,15 @@ def _codex_timeout_seconds() -> int:
 
 def _auth_lock_path(path: Path) -> Path:
     return path.with_name(f"{path.name}.brrragent.lock")
+
+
+@contextmanager
+def _exclusive_path_lock(path: Path) -> Iterator[None]:
+    lock_path = _auth_lock_path(path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("w", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        yield
 
 
 def _validate_profile_name(profile: str) -> str:
@@ -308,9 +322,42 @@ def _run_codex_cli_spark_completion(
     response_schema: dict | None,
     timeout: int,
 ) -> str:
+    binary = _codex_cli_binary()
+    direct_path = _auth_path()
+    cli_path = _codex_cli_auth_path()
+    if direct_path.resolve() == cli_path.resolve():
+        raise ValueError("Codex direct and CLI auth paths must differ")
+
+    with _exclusive_path_lock(direct_path), _exclusive_path_lock(cli_path):
+        auth = _read_auth_file(direct_path)
+        openai_auth = _validate_openai_auth(auth, direct_path)
+        _sync_codex_cli_auth_unlocked(cli_path, openai_auth, required=True)
+        _read_codex_cli_auth_unlocked(cli_path)
+        try:
+            return _run_codex_cli_spark_completion_locked(
+                binary=binary,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                model=model,
+                response_schema=response_schema,
+                timeout=timeout,
+            )
+        finally:
+            _sync_direct_auth_from_cli_unlocked(direct_path, cli_path)
+
+
+def _run_codex_cli_spark_completion_locked(
+    *,
+    binary: str,
+    system_prompt: str,
+    user_prompt: str,
+    model: str,
+    response_schema: dict | None,
+    timeout: int,
+) -> str:
     bare_model, reasoning_effort = parse_codex_model(model)
     cmd = [
-        _ensure_codex_cli_ready(),
+        binary,
         "exec",
         "--ephemeral",
         "--ignore-user-config",
@@ -377,14 +424,28 @@ def _read_auth_file(path: Path) -> dict:
 
 
 def _write_auth_file(path: Path, auth: dict) -> None:
-    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    tmp_path.write_text(json.dumps(auth, indent=2), encoding="utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
     try:
         mode = path.stat().st_mode & 0o777
     except FileNotFoundError:
         mode = 0o600
-    tmp_path.chmod(mode)
-    os.replace(tmp_path, path)
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as tmp_file:
+            json.dump(auth, tmp_file, indent=2)
+            tmp_path = Path(tmp_file.name)
+        tmp_path.chmod(mode)
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path:
+            tmp_path.unlink(missing_ok=True)
 
 
 def _is_codex_cli_auth(auth: dict | None) -> bool:
@@ -399,8 +460,7 @@ def _is_codex_cli_auth(auth: dict | None) -> bool:
     )
 
 
-def _read_codex_cli_auth() -> dict:
-    path = _codex_cli_auth_path()
+def _read_codex_cli_auth_unlocked(path: Path) -> dict:
     try:
         auth = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
@@ -420,30 +480,77 @@ def _read_codex_cli_auth() -> dict:
     return auth
 
 
-def _ensure_codex_cli_ready() -> str:
-    binary = _codex_cli_binary()
-    _read_codex_cli_auth()
-    return binary
+def _read_codex_cli_auth() -> dict:
+    path = _codex_cli_auth_path()
+    with _exclusive_path_lock(path):
+        return _read_codex_cli_auth_unlocked(path)
+
+
+def _sync_codex_cli_auth_unlocked(
+    path: Path, openai_auth: dict, *, required: bool = False
+) -> None:
+    try:
+        auth = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        auth = {}
+
+    id_token = openai_auth.get("idToken")
+    if not id_token and _is_codex_cli_auth(auth):
+        existing_account_id = auth["tokens"].get("account_id")
+        if existing_account_id in {None, openai_auth.get("accountId")}:
+            id_token = auth["tokens"]["id_token"]
+    if not id_token:
+        if required:
+            raise ValueError(
+                "Codex credential lacks idToken. Run `brrragent-auth login` again."
+            )
+        return
+
+    tokens = {
+        "id_token": id_token,
+        "access_token": openai_auth["access"],
+        "refresh_token": openai_auth["refresh"],
+    }
+    if openai_auth.get("accountId"):
+        tokens["account_id"] = openai_auth["accountId"]
+    _write_auth_file(
+        path,
+        {
+            "OPENAI_API_KEY": None,
+            "auth_mode": "chatgpt",
+            "tokens": tokens,
+            "last_refresh": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        },
+    )
 
 
 def _sync_codex_cli_auth(openai_auth: dict) -> None:
     path = _codex_cli_auth_path()
-    try:
-        auth = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return
-    if not _is_codex_cli_auth(auth):
-        return
+    with _exclusive_path_lock(path):
+        _sync_codex_cli_auth_unlocked(path, openai_auth)
 
-    tokens = dict(auth["tokens"])
-    tokens["access_token"] = openai_auth["access"]
-    tokens["refresh_token"] = openai_auth["refresh"]
-    if openai_auth.get("accountId"):
-        tokens["account_id"] = openai_auth["accountId"]
-    auth["tokens"] = tokens
-    auth["auth_mode"] = auth.get("auth_mode") or "chatgpt"
-    auth["last_refresh"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    _write_auth_file(path, auth)
+
+def _sync_direct_auth_from_cli_unlocked(direct_path: Path, cli_path: Path) -> None:
+    cli_auth = _read_codex_cli_auth_unlocked(cli_path)
+    tokens = cli_auth["tokens"]
+    auth = _read_auth_file(direct_path)
+    openai_auth = _validate_openai_auth(auth, direct_path)
+    access_token = tokens["access_token"]
+    claims = _decode_jwt_payload(access_token)
+    try:
+        expires_ms = int(claims["exp"]) * 1000
+    except (KeyError, TypeError, ValueError):
+        expires_ms = int(openai_auth.get("expires") or 0)
+    auth["openai"] = {
+        **openai_auth,
+        "access": access_token,
+        "refresh": tokens["refresh_token"],
+        "idToken": tokens["id_token"],
+        "expires": expires_ms,
+    }
+    if tokens.get("account_id"):
+        auth["openai"]["accountId"] = tokens["account_id"]
+    _write_auth_file(direct_path, auth)
 
 
 def has_opencode_oauth() -> bool:
@@ -529,6 +636,8 @@ def _refresh_access_token(openai_auth: dict) -> tuple[dict, str, str | None]:
         "refresh": payload.get("refresh_token") or openai_auth["refresh"],
         "expires": expires_ms,
     }
+    if payload.get("id_token"):
+        refreshed_auth["idToken"] = payload["id_token"]
     if account_id:
         refreshed_auth["accountId"] = account_id
     return refreshed_auth, access_token, account_id
@@ -536,10 +645,7 @@ def _refresh_access_token(openai_auth: dict) -> tuple[dict, str, str | None]:
 
 def _get_codex_access_token() -> tuple[str, str | None]:
     path = _auth_path()
-    lock_path = _auth_lock_path(path)
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("w", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
+    with _exclusive_path_lock(path):
         auth = _read_auth_file(path)
         openai_auth = _validate_openai_auth(auth, path)
         stored = _valid_stored_access(openai_auth)
