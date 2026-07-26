@@ -55,6 +55,7 @@ def test_login_writes_isolated_direct_and_cli_credentials(
         "type": "oauth",
         "access": "access_test",
         "refresh": "refresh_test",
+        "idToken": tokens["id_token"],
         "expires": direct["openai"]["expires"],
         "accountId": "acct_test",
     }

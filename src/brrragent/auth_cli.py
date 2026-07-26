@@ -6,6 +6,7 @@ import argparse
 import base64
 import json
 import os
+import tempfile
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -166,6 +167,7 @@ def _auth_documents(tokens: dict[str, Any]) -> tuple[dict[str, Any], dict[str, A
             "type": "oauth",
             "access": access_token,
             "refresh": refresh_token,
+            "idToken": id_token,
             "expires": expires_ms,
             "accountId": account_id,
         }
@@ -186,12 +188,22 @@ def _auth_documents(tokens: dict[str, Any]) -> tuple[dict[str, Any], dict[str, A
 
 def _stage_auth(path: Path, value: dict[str, Any]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    pending = path.with_name(f".{path.name}.{os.getpid()}.pending")
+    pending = None
     try:
-        pending.write_text(json.dumps(value, indent=2), encoding="utf-8")
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".pending",
+            delete=False,
+        ) as pending_file:
+            json.dump(value, pending_file, indent=2)
+            pending = Path(pending_file.name)
         pending.chmod(0o600)
     except Exception:
-        pending.unlink(missing_ok=True)
+        if pending:
+            pending.unlink(missing_ok=True)
         raise
     return pending
 
