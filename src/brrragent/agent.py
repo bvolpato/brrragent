@@ -42,6 +42,7 @@ from typing import Callable, Optional
 
 from brrragent.keys import KeyPool
 from brrragent.mcp_tools import McpToolCaller
+from brrragent.prompt_cache import AgentUsage, PromptCacheConfig
 
 logger = logging.getLogger(__name__)
 
@@ -52,8 +53,8 @@ MAX_TOOL_TURNS = 12
 # OpenAI-compatible API instead of going through OpenRouter.
 NATIVE_PROVIDERS: dict[str, tuple[str, str]] = {
     "fireworks/": ("https://api.fireworks.ai/inference/v1", "FIREWORKS_API_KEY"),
-    "minimax/":   ("https://api.minimax.io/v1",              "MINIMAX_API_KEY"),
-    "yunwu/":     ("https://yunwu.ai/v1",                    "YUNWU_API_KEY"),
+    "minimax/": ("https://api.minimax.io/v1", "MINIMAX_API_KEY"),
+    "yunwu/": ("https://yunwu.ai/v1", "YUNWU_API_KEY"),
     "z-ai/": (
         os.environ.get("ZAI_BASE_URL", "https://api.z.ai/api/coding/paas/v4"),
         "ZAI_API_KEY",
@@ -90,7 +91,7 @@ def _use_codex_oauth_backend(model: str, api_key: str | None) -> bool:
 def _get_gemini_model_name(model: str) -> str:
     """Strip 'google/' prefix to get the bare Gemini model name."""
     if model.startswith("google/"):
-        return model[len("google/"):]
+        return model[len("google/") :]
     return model
 
 
@@ -109,11 +110,13 @@ def _resolve_native_provider(model: str) -> tuple[str, str, str, str] | None:
             api_key = os.environ.get(env_var, "").strip()
             if api_key:
                 provider_name = prefix.rstrip("/")
-                bare_model = model[len(prefix):]
+                bare_model = model[len(prefix) :]
                 return base_url, api_key, provider_name, bare_model
             logger.debug(
                 "[agent] Model %s matches %s but %s is not set — falling through to OpenRouter",
-                model, prefix, env_var,
+                model,
+                prefix,
+                env_var,
             )
     return None
 
@@ -149,6 +152,8 @@ def run_agent(
     max_retries: int = 3,
     on_tool_call: Optional[Callable] = None,
     response_schema: dict | None = None,
+    prompt_cache: PromptCacheConfig | None = None,
+    on_usage: Callable[[AgentUsage], None] | None = None,
 ) -> str:
     """
     Run an agentic react loop with tool calling.
@@ -183,6 +188,8 @@ def run_agent(
         max_retries: Retries per API call on transient errors.
         on_tool_call: Optional callback(tool_name, tool_args) for logging/UI.
         response_schema: JSON Schema dict for structured output (optional).
+        prompt_cache: Stable cache key and requested TTL for this prompt version.
+        on_usage: Optional callback invoked with provider token and cache usage.
 
     Returns:
         The model's final text response.
@@ -193,6 +200,7 @@ def run_agent(
     """
     if mcp is None:
         from brrragent.mcp_tools import get_default_caller
+
         mcp = get_default_caller()
 
     # Build pools from env vars if not explicitly provided
@@ -217,14 +225,10 @@ def run_agent(
 
     # Smart routing: decide which backend to use
     use_gemini_direct = (
-        _is_google_model(model)
-        and gemini_key_pool is not None
-        and api_key is None
+        _is_google_model(model) and gemini_key_pool is not None and api_key is None
     )
     use_openai_direct = (
-        _is_openai_model(model)
-        and openai_key_pool is not None
-        and api_key is None
+        _is_openai_model(model) and openai_key_pool is not None and api_key is None
     )
     use_codex_oauth = _use_codex_oauth_backend(model, api_key)
 
@@ -232,7 +236,11 @@ def run_agent(
         from brrragent.gemini import run_gemini_agent
 
         bare_model = _get_gemini_model_name(model)
-        logger.info("[agent] Using Gemini direct (model=%s, pool=%s)", bare_model, gemini_key_pool.status())
+        logger.info(
+            "[agent] Using Gemini direct (model=%s, pool=%s)",
+            bare_model,
+            gemini_key_pool.status(),
+        )
         return run_gemini_agent(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
@@ -245,6 +253,8 @@ def run_agent(
             max_retries=max_retries,
             on_tool_call=on_tool_call,
             response_schema=response_schema,
+            prompt_cache=prompt_cache,
+            on_usage=on_usage,
         )
 
     if use_codex_oauth:
@@ -263,12 +273,18 @@ def run_agent(
             max_retries=max_retries,
             on_tool_call=on_tool_call,
             response_schema=response_schema,
+            prompt_cache=prompt_cache,
+            on_usage=on_usage,
         )
 
     if use_openai_direct:
         from brrragent.openai_direct import run_openai_agent
 
-        logger.info("[agent] Using OpenAI direct (model=%s, pool=%s)", model, openai_key_pool.status())
+        logger.info(
+            "[agent] Using OpenAI direct (model=%s, pool=%s)",
+            model,
+            openai_key_pool.status(),
+        )
         return run_openai_agent(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
@@ -282,6 +298,8 @@ def run_agent(
             max_retries=max_retries,
             on_tool_call=on_tool_call,
             response_schema=response_schema,
+            prompt_cache=prompt_cache,
+            on_usage=on_usage,
         )
 
     # Check for native provider routing (fireworks/, minimax/, etc.)
@@ -296,7 +314,9 @@ def run_agent(
         if provider_name in {"yunwu", "z-ai"}:
             bare_model, reasoning_effort = parse_openai_model(bare_model)
         if provider_name == "z-ai" and not reasoning_effort:
-            reasoning_effort = os.environ.get("ZAI_REASONING_EFFORT", "xhigh").strip() or "xhigh"
+            reasoning_effort = (
+                os.environ.get("ZAI_REASONING_EFFORT", "xhigh").strip() or "xhigh"
+            )
         logger.info("[agent] Using %s native (model=%s)", provider_name, bare_model)
         return run_openrouter_agent(
             system_prompt=system_prompt,
@@ -314,6 +334,8 @@ def run_agent(
             on_tool_call=on_tool_call,
             response_schema=response_schema,
             reasoning_effort=reasoning_effort,
+            prompt_cache=None,
+            on_usage=on_usage,
         )
 
     # Fallback: OpenRouter
@@ -323,11 +345,14 @@ def run_agent(
     effective_pool = None if api_key else openrouter_key_pool
 
     if effective_key is None and effective_pool is None:
-        raise ValueError("No API key: set GEMINI_API_KEY or OPENROUTER_API_KEY, or provide a key pool")
+        raise ValueError(
+            "No API key: set GEMINI_API_KEY or OPENROUTER_API_KEY, or provide a key pool"
+        )
 
     logger.info(
         "[agent] Using OpenRouter (model=%s, pool=%s)",
-        model, effective_pool.status() if effective_pool else "explicit-key",
+        model,
+        effective_pool.status() if effective_pool else "explicit-key",
     )
     return run_openrouter_agent(
         system_prompt=system_prompt,
@@ -344,4 +369,6 @@ def run_agent(
         max_retries=max_retries,
         on_tool_call=on_tool_call,
         response_schema=response_schema,
+        prompt_cache=prompt_cache,
+        on_usage=on_usage,
     )

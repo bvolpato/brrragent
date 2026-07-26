@@ -32,7 +32,7 @@ dependencies = [
 ## Quick Start
 
 ```python
-from brrragent import McpToolCaller, run_agent
+from brrragent import McpToolCaller, PromptCacheConfig, run_agent
 
 result = run_agent(
     system_prompt="You are a helpful research assistant.",
@@ -136,6 +136,8 @@ result = run_agent(
     max_retries=3,         # retries on transient errors
     on_tool_call=my_cb,    # optional callback(name, args)
     response_schema={...}, # optional JSON schema for structured output
+    prompt_cache=PromptCacheConfig("content-caption:v2", ttl="1h"),
+    on_usage=record_usage, # optional callback(AgentUsage)
 )
 ```
 
@@ -156,6 +158,20 @@ result = run_agent(
 | `max_retries` | `int` | `3` | Retries on transient errors |
 | `on_tool_call` | `Callable \| None` | `None` | Callback `(tool_name, tool_args)` |
 | `response_schema` | `dict \| None` | `None` | JSON Schema for structured output |
+| `prompt_cache` | `PromptCacheConfig \| None` | `None` | Stable cache key, TTL, and mode |
+| `on_usage` | `Callable \| None` | `None` | Callback receiving normalized token/cache usage per provider request |
+
+### Prompt caching
+
+Keep reusable tools and system instructions before request-specific content. Use one versioned key per stable prompt, without user IDs, timestamps, URLs, or prompt text:
+
+```python
+from brrragent import PromptCacheConfig
+
+cache = PromptCacheConfig(key="content-caption:v2", ttl="1h")
+```
+
+brrragent maps this to OpenAI public API cache keys and GPT-5.6 explicit breakpoints, Codex OAuth cache keys, OpenRouter affinity and compatible `cache_control` blocks, and Gemini implicit caching. `on_usage` reports `cache_read_input_tokens` and `cache_write_input_tokens` when providers return them. Gemini explicit cache resources remain caller-managed.
 
 ### `McpToolCaller`
 

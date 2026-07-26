@@ -1,3 +1,4 @@
+from brrragent import PromptCacheConfig
 from brrragent.openai_direct import (
     _build_chat_kwargs,
     _build_responses_kwargs,
@@ -65,7 +66,10 @@ def test_to_responses_tool_flattens_openai_function_tool():
             "function": {
                 "name": "search",
                 "description": "Search",
-                "parameters": {"type": "object", "properties": {"q": {"type": "string"}}},
+                "parameters": {
+                    "type": "object",
+                    "properties": {"q": {"type": "string"}},
+                },
             },
         }
     )
@@ -87,7 +91,11 @@ def test_build_responses_kwargs_uses_reasoning_and_text_schema():
         tools=[{"type": "function", "function": {"name": "search"}}],
         temperature=0.4,
         max_tokens=32000,
-        response_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        response_schema={
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
     )
 
     assert kwargs["model"] == "gpt-5.5"
@@ -98,3 +106,23 @@ def test_build_responses_kwargs_uses_reasoning_and_text_schema():
     assert kwargs["tools"][0]["name"] == "search"
     assert kwargs["text"]["format"]["type"] == "json_schema"
     assert "temperature" not in kwargs
+
+
+def test_gpt_56_responses_marks_stable_instructions_for_explicit_cache():
+    kwargs = _build_responses_kwargs(
+        model="openai/gpt-5.6-luna:medium",
+        input_items=[{"role": "user", "content": "dynamic"}],
+        instructions="stable system",
+        tools=[],
+        temperature=0.4,
+        max_tokens=1000,
+        response_schema={"type": "object", "properties": {}},
+        prompt_cache=PromptCacheConfig("caption:v2"),
+    )
+
+    assert kwargs["prompt_cache_key"] == "caption:v2"
+    assert kwargs["prompt_cache_options"] == {"mode": "explicit"}
+    assert "instructions" not in kwargs
+    assert kwargs["input"][0]["content"][0]["prompt_cache_breakpoint"] == {
+        "mode": "explicit"
+    }

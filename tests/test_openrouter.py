@@ -1,4 +1,4 @@
-from brrragent import openrouter
+from brrragent import PromptCacheConfig, openrouter
 
 
 class DummyCompletions:
@@ -45,3 +45,45 @@ def test_openrouter_call_uses_reasoning_kwargs_when_requested():
     assert call["reasoning_effort"] == "high"
     assert "max_tokens" not in call
     assert "temperature" not in call
+
+
+def test_openrouter_call_sets_stable_cache_key():
+    client = DummyClient()
+
+    openrouter._call_with_retry(
+        client=client,
+        model="anthropic/claude-sonnet-4",
+        messages=[],
+        tools=[],
+        temperature=0.7,
+        max_tokens=1234,
+        max_retries=1,
+        response_format=None,
+        key_pool=None,
+        current_key="",
+        base_url="https://openrouter.ai/api/v1",
+        prompt_cache=PromptCacheConfig("caption:v2"),
+    )
+
+    assert client.chat.completions.calls[0]["extra_body"] == {
+        "prompt_cache_key": "caption:v2",
+        "session_id": "caption:v2",
+    }
+
+
+def test_anthropic_system_block_marks_explicit_cache_breakpoint():
+    content = openrouter._system_content(
+        "stable system",
+        "anthropic/claude-sonnet-4",
+        PromptCacheConfig("caption:v2"),
+    )
+
+    assert content[0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+    assert (
+        openrouter._system_content(
+            "stable system",
+            "google/gemini-3-flash-preview",
+            PromptCacheConfig("caption:v2"),
+        )
+        == "stable system"
+    )

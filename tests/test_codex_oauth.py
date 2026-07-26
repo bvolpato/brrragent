@@ -3,6 +3,7 @@ import subprocess
 
 import pytest
 
+from brrragent import PromptCacheConfig
 from brrragent.codex_oauth import (
     _build_payload,
     _codex_cli_config_args,
@@ -30,6 +31,21 @@ def test_codex_spark_detection_is_codex_prefix_guarded():
     assert _is_codex_spark_model("codex/gpt-5.3-codex-spark:xhigh")
     assert not _is_codex_spark_model("openai/gpt-5.3-codex-spark:xhigh")
     assert not _is_codex_spark_model("codex/gpt-5.4:xhigh")
+
+
+def test_build_payload_sets_stable_cache_key():
+    payload = _build_payload(
+        model="codex/gpt-5.6-luna:medium",
+        instructions="stable system",
+        input_items=[{"role": "user", "content": "dynamic"}],
+        tools=[],
+        response_schema=None,
+        prompt_cache=PromptCacheConfig("reel-caption:v2"),
+    )
+
+    assert payload["prompt_cache_key"] == "reel-caption:v2"
+    assert payload["instructions"] == "stable system"
+    assert payload["input"] == [{"role": "user", "content": "dynamic"}]
 
 
 def test_codex_cli_config_args_maps_reasoning_effort():
@@ -184,7 +200,9 @@ def test_run_codex_cli_spark_completion_builds_guarded_command(monkeypatch, tmp_
     assert captured["kwargs"]["timeout"] == 45
 
 
-def test_run_codex_cli_spark_completion_fails_fast_when_codex_missing(monkeypatch, tmp_path):
+def test_run_codex_cli_spark_completion_fails_fast_when_codex_missing(
+    monkeypatch, tmp_path
+):
     _write_codex_cli_auth(tmp_path / "codex-home")
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
     monkeypatch.setenv("BRRRAGENT_CODEX_CLI", str(tmp_path / "missing-codex"))
@@ -199,7 +217,9 @@ def test_run_codex_cli_spark_completion_fails_fast_when_codex_missing(monkeypatc
         )
 
 
-def test_run_codex_cli_spark_completion_fails_fast_when_auth_missing(monkeypatch, tmp_path):
+def test_run_codex_cli_spark_completion_fails_fast_when_auth_missing(
+    monkeypatch, tmp_path
+):
     codex_binary = tmp_path / "codex"
     _write_fake_executable(codex_binary)
     monkeypatch.setenv("BRRRAGENT_CODEX_CLI", str(codex_binary))
@@ -290,6 +310,17 @@ def test_codex_headers_keep_existing_opencode_envelope_for_regular_models():
     assert "session-id" not in headers
 
 
+def test_codex_headers_accept_stable_cache_session():
+    headers = _codex_headers(
+        "access",
+        "account",
+        model="codex/gpt-5.6-luna:medium",
+        session_id="brrragent-stable",
+    )
+
+    assert headers["session_id"] == "brrragent-stable"
+
+
 def test_codex_headers_match_cli_envelope_for_spark(monkeypatch):
     monkeypatch.setenv("BRRRAGENT_CODEX_USER_AGENT", "codex_cli_rs/test")
     identity = {
@@ -321,7 +352,9 @@ def test_build_payload_matches_codex_backend_constraints():
     payload = _build_payload(
         model="codex/gpt-5.4:xhigh",
         instructions="system",
-        input_items=[{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        input_items=[
+            {"role": "user", "content": [{"type": "input_text", "text": "hi"}]}
+        ],
         tools=[],
         response_schema=None,
     )
@@ -345,7 +378,9 @@ def test_build_payload_adds_codex_metadata_for_spark():
     payload = _build_payload(
         model="codex/gpt-5.3-codex-spark:xhigh",
         instructions="system",
-        input_items=[{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        input_items=[
+            {"role": "user", "content": [{"type": "input_text", "text": "hi"}]}
+        ],
         tools=[],
         response_schema=None,
         request_identity=identity,
@@ -367,7 +402,9 @@ def test_build_payload_ignores_previous_response_id_for_codex_backend():
     payload = _build_payload(
         model="openai/gpt-5.4-mini",
         instructions="system",
-        input_items=[{"type": "function_call_output", "call_id": "call_1", "output": "ok"}],
+        input_items=[
+            {"type": "function_call_output", "call_id": "call_1", "output": "ok"}
+        ],
         tools=[],
         response_schema=None,
         previous_response_id="resp_1",
@@ -399,7 +436,9 @@ def test_extract_response_text_and_function_calls():
 
 def test_has_opencode_oauth_reads_configured_path(tmp_path, monkeypatch):
     auth_path = tmp_path / "auth.json"
-    auth_path.write_text(json.dumps({"openai": {"type": "oauth", "refresh": "rt_test"}}))
+    auth_path.write_text(
+        json.dumps({"openai": {"type": "oauth", "refresh": "rt_test"}})
+    )
     monkeypatch.setenv("BRRRAGENT_OPENCODE_AUTH_PATH", str(auth_path))
 
     assert has_opencode_oauth()

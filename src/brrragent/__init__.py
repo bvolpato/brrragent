@@ -17,16 +17,19 @@ Backends (importable individually):
   - brrragent.keys: API key utilities
 """
 
-from brrragent.mcp_tools import McpToolCaller, get_default_caller
 from brrragent.agent import run_agent
-from brrragent.keys import pick_key, pick_env_key, KeyPool, RateLimitExhausted
+from brrragent.keys import KeyPool, RateLimitExhausted, pick_env_key, pick_key
+from brrragent.mcp_tools import McpToolCaller, get_default_caller
+from brrragent.prompt_cache import AgentUsage, PromptCacheConfig
 
 __all__ = [
-    "McpToolCaller",
-    "get_default_caller",
-    "run_agent",
-    "pick_key",
-    "pick_env_key",
+    "AgentUsage",
     "KeyPool",
+    "McpToolCaller",
+    "PromptCacheConfig",
     "RateLimitExhausted",
+    "get_default_caller",
+    "pick_env_key",
+    "pick_key",
+    "run_agent",
 ]
