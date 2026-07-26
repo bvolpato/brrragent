@@ -30,6 +30,8 @@ def test_auth_paths_default_to_brrragent_owned_storage(monkeypatch, tmp_path):
         "BRRRAGENT_AUTH_PATH",
         "BRRRAGENT_OPENCODE_AUTH_PATH",
         "BRRRAGENT_CODEX_HOME",
+        "BRRRAGENT_PROFILE",
+        "BRRRAGENT_PROFILE_ROOT",
         "CODEX_HOME",
     ):
         monkeypatch.delenv(name, raising=False)
@@ -48,6 +50,54 @@ def test_auth_paths_preserve_explicit_legacy_overrides(monkeypatch, tmp_path):
 
     assert _auth_path() == direct_path
     assert _codex_cli_auth_path() == codex_home / "auth.json"
+
+
+def test_named_profile_resolves_isolated_paths(monkeypatch, tmp_path):
+    profile_root = tmp_path / "profiles"
+    monkeypatch.setenv("BRRRAGENT_PROFILE", "insta-ai-bruna")
+    monkeypatch.setenv("BRRRAGENT_PROFILE_ROOT", str(profile_root))
+    for name in (
+        "BRRRAGENT_AUTH_PATH",
+        "BRRRAGENT_OPENCODE_AUTH_PATH",
+        "BRRRAGENT_CODEX_HOME",
+        "CODEX_HOME",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    assert _auth_path() == profile_root / "insta-ai-bruna/codex-auth.json"
+    assert _codex_cli_auth_path() == (
+        profile_root / "insta-ai-bruna/codex-home/auth.json"
+    )
+
+
+def test_explicit_paths_override_named_profile(monkeypatch, tmp_path):
+    direct_path = tmp_path / "direct.json"
+    codex_home = tmp_path / "codex-home"
+    monkeypatch.setenv("BRRRAGENT_PROFILE", "ignored-profile")
+    monkeypatch.setenv("BRRRAGENT_AUTH_PATH", str(direct_path))
+    monkeypatch.setenv("BRRRAGENT_CODEX_HOME", str(codex_home))
+
+    assert _auth_path() == direct_path
+    assert _codex_cli_auth_path() == codex_home / "auth.json"
+
+
+def test_named_profile_overrides_generic_codex_home(monkeypatch, tmp_path):
+    profile_root = tmp_path / "profiles"
+    monkeypatch.setenv("BRRRAGENT_PROFILE", "insta-ai-bruna")
+    monkeypatch.setenv("BRRRAGENT_PROFILE_ROOT", str(profile_root))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "shared-codex-home"))
+    monkeypatch.delenv("BRRRAGENT_CODEX_HOME", raising=False)
+
+    assert _codex_cli_auth_path() == (
+        profile_root / "insta-ai-bruna/codex-home/auth.json"
+    )
+
+
+def test_named_profile_rejects_path_traversal(monkeypatch):
+    monkeypatch.setenv("BRRRAGENT_PROFILE", "../shared")
+
+    with pytest.raises(ValueError, match="Profile must contain"):
+        _auth_path()
 
 
 def test_parse_codex_model_strips_prefix_and_reasoning_suffix():
