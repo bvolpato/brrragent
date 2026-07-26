@@ -19,18 +19,21 @@ Backends (importable individually):
 """
 
 from brrragent.agent import run_agent
+from brrragent.codex_oauth import CodexAuthConfig, codex_auth_context
 from brrragent.keys import KeyPool, RateLimitExhausted, pick_env_key, pick_key
 from brrragent.mcp_tools import McpServerConfig, McpToolCaller, get_default_caller
 from brrragent.prompt_cache import AgentUsage, PromptCacheConfig
 
 __all__ = [
     "AgentUsage",
+    "CodexAuthConfig",
     "KeyPool",
     "McpServerConfig",
     "McpToolCaller",
     "PromptCacheConfig",
     "RateLimitExhausted",
     "get_default_caller",
+    "codex_auth_context",
     "pick_env_key",
     "pick_key",
     "run_agent",

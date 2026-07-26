@@ -14,7 +14,10 @@ import subprocess
 import tempfile
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 from urllib import error, parse, request
 
@@ -49,6 +52,39 @@ _RETRYABLE_MARKERS = (
 )
 
 
+@dataclass(frozen=True)
+class CodexAuthConfig:
+    """Per-call Codex credential selection."""
+
+    profile: str | None = None
+    auth_path: str | Path | None = None
+    codex_home: str | Path | None = None
+
+    def __post_init__(self) -> None:
+        if not self.profile and self.auth_path is None and self.codex_home is None:
+            raise ValueError("Codex auth config requires a profile or explicit paths")
+        if self.profile:
+            _validate_profile_name(self.profile)
+            if self.auth_path is not None or self.codex_home is not None:
+                raise ValueError("Codex auth profile cannot be combined with paths")
+        elif (self.auth_path is None) != (self.codex_home is None):
+            raise ValueError("Codex auth_path and codex_home must be provided together")
+
+
+_ACTIVE_AUTH_CONFIG: ContextVar[CodexAuthConfig | None] = ContextVar(
+    "brrragent_codex_auth_config", default=None
+)
+
+
+@contextmanager
+def codex_auth_context(config: CodexAuthConfig | None) -> Iterator[None]:
+    token = _ACTIVE_AUTH_CONFIG.set(config)
+    try:
+        yield
+    finally:
+        _ACTIVE_AUTH_CONFIG.reset(token)
+
+
 def parse_codex_model(model: str) -> tuple[str, str | None]:
     if model.startswith("codex/"):
         return parse_openai_model("openai/" + model[len("codex/") :])
@@ -61,6 +97,12 @@ def _is_codex_spark_model(model: str) -> bool:
 
 
 def _auth_path() -> Path:
+    active = _ACTIVE_AUTH_CONFIG.get()
+    if active:
+        if active.profile:
+            return _profile_paths(active.profile)[0]
+        if active.auth_path is not None:
+            return Path(active.auth_path).expanduser()
     configured = (
         os.getenv("BRRRAGENT_AUTH_PATH", "").strip()
         or os.getenv("BRRRAGENT_OPENCODE_AUTH_PATH", "").strip()
@@ -110,6 +152,12 @@ def _profile_paths(profile: str) -> tuple[Path, Path]:
 
 
 def _codex_home() -> Path:
+    active = _ACTIVE_AUTH_CONFIG.get()
+    if active:
+        if active.profile:
+            return _profile_paths(active.profile)[1]
+        if active.codex_home is not None:
+            return Path(active.codex_home).expanduser()
     configured = os.getenv("BRRRAGENT_CODEX_HOME", "").strip()
     if configured:
         return Path(configured).expanduser()

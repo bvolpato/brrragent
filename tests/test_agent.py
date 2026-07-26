@@ -1,6 +1,7 @@
 import pytest
 
 from brrragent import agent
+from brrragent.codex_oauth import CodexAuthConfig
 from brrragent.keys import KeyPool
 
 
@@ -209,6 +210,68 @@ def test_run_agent_routes_codex_prefix_without_env(monkeypatch):
     )
 
     assert calls[0]["model"] == "codex/gpt-5.4:xhigh"
+
+
+def test_run_agent_applies_per_call_codex_auth(monkeypatch, tmp_path):
+    observed = {}
+
+    def fake_codex_agent(**kwargs):
+        from brrragent.codex_oauth import _auth_path, _codex_cli_auth_path
+
+        observed["auth_path"] = _auth_path()
+        observed["cli_auth_path"] = _codex_cli_auth_path()
+        return "ok"
+
+    auth_path = tmp_path / "auth.json"
+    codex_home = tmp_path / "codex-home"
+    monkeypatch.setattr("brrragent.codex_oauth.run_codex_oauth_agent", fake_codex_agent)
+
+    assert (
+        agent.run_agent(
+            system_prompt="system",
+            user_prompt="user",
+            model="codex/gpt-5.4:xhigh",
+            mcp=DummyMcp(),
+            codex_auth=CodexAuthConfig(
+                auth_path=auth_path,
+                codex_home=codex_home,
+            ),
+        )
+        == "ok"
+    )
+    assert observed == {
+        "auth_path": auth_path,
+        "cli_auth_path": codex_home / "auth.json",
+    }
+
+
+def test_run_agent_preserves_existing_codex_auth_context(monkeypatch, tmp_path):
+    from brrragent.codex_oauth import codex_auth_context
+
+    observed = {}
+
+    def fake_codex_agent(**kwargs):
+        from brrragent.codex_oauth import _auth_path
+
+        observed["auth_path"] = _auth_path()
+        return "ok"
+
+    auth_path = tmp_path / "auth.json"
+    monkeypatch.setattr("brrragent.codex_oauth.run_codex_oauth_agent", fake_codex_agent)
+
+    with codex_auth_context(
+        CodexAuthConfig(auth_path=auth_path, codex_home=tmp_path / "codex-home")
+    ):
+        assert (
+            agent.run_agent(
+                system_prompt="system",
+                user_prompt="user",
+                model="codex/gpt-5.4:xhigh",
+                mcp=DummyMcp(),
+            )
+            == "ok"
+        )
+    assert observed["auth_path"] == auth_path
 
 
 def test_run_agent_requires_api_key_when_no_pool(monkeypatch):
