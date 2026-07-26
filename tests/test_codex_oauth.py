@@ -5,7 +5,9 @@ import pytest
 
 from brrragent import PromptCacheConfig
 from brrragent.codex_oauth import (
+    _auth_path,
     _build_payload,
+    _codex_cli_auth_path,
     _codex_cli_config_args,
     _codex_headers,
     _codex_timeout_seconds,
@@ -20,6 +22,32 @@ from brrragent.codex_oauth import (
     parse_codex_model,
     run_codex_oauth_agent,
 )
+
+
+def test_auth_paths_default_to_brrragent_owned_storage(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    for name in (
+        "BRRRAGENT_AUTH_PATH",
+        "BRRRAGENT_OPENCODE_AUTH_PATH",
+        "BRRRAGENT_CODEX_HOME",
+        "CODEX_HOME",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    assert _auth_path() == tmp_path / ".cache/brrragent/codex-auth.json"
+    assert _codex_cli_auth_path() == (
+        tmp_path / ".cache/brrragent/codex-home/auth.json"
+    )
+
+
+def test_auth_paths_preserve_explicit_legacy_overrides(monkeypatch, tmp_path):
+    direct_path = tmp_path / "profile.json"
+    codex_home = tmp_path / "codex-profile"
+    monkeypatch.setenv("BRRRAGENT_OPENCODE_AUTH_PATH", str(direct_path))
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    assert _auth_path() == direct_path
+    assert _codex_cli_auth_path() == codex_home / "auth.json"
 
 
 def test_parse_codex_model_strips_prefix_and_reasoning_suffix():
@@ -198,6 +226,7 @@ def test_run_codex_cli_spark_completion_builds_guarded_command(monkeypatch, tmp_
     assert 'model_reasoning_effort="xhigh"' in captured["cmd"]
     assert "--json" in captured["cmd"]
     assert captured["kwargs"]["timeout"] == 45
+    assert captured["kwargs"]["env"]["CODEX_HOME"] == str(tmp_path / "codex-home")
 
 
 def test_run_codex_cli_spark_completion_fails_fast_when_codex_missing(

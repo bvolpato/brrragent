@@ -70,6 +70,8 @@ jobs:
           uv pip install --python "$sdist_env/bin/python" "${sdist}[gemini]"
           "$wheel_env/bin/python" -c "from brrragent import PromptCacheConfig, run_agent; import brrragent.gemini"
           "$sdist_env/bin/python" -c "from brrragent import PromptCacheConfig, run_agent; import brrragent.gemini"
+          "$wheel_env/bin/brrragent-auth" --help
+          "$sdist_env/bin/brrragent-auth" --help
 
   test:
     runs-on: ubuntu-latest

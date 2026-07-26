@@ -11,6 +11,9 @@ dependencies = [
     "openai>=1.66.0",
 ]
 
+[project.scripts]
+brrragent-auth = "brrragent.auth_cli:main"
+
 [project.optional-dependencies]
 gemini = ["google-genai>=1.0.0"]
 

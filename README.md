@@ -52,6 +52,23 @@ print(result)
 Provider credentials are read from the caller's environment. Common variables
 are `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, and `GEMINI_API_KEY`.
 
+## Codex OAuth
+
+Create brrragent-owned Codex credentials with device login:
+
+```bash
+uv run brrragent-auth login
+```
+
+This writes direct OAuth credentials to `~/.cache/brrragent/codex-auth.json`
+and Codex CLI credentials to `~/.cache/brrragent/codex-home/auth.json`, both
+with `0600` permissions. Default routing does not read shared OpenCode auth or
+`~/.codex/auth.json`.
+
+Override locations with `BRRRAGENT_AUTH_PATH`, `BRRRAGENT_CODEX_HOME`, or
+command flags. Existing callers can still use `BRRRAGENT_OPENCODE_AUTH_PATH`
+and explicit `CODEX_HOME` values.
+
 ## Prompt caching
 
 Keep reusable tools and system instructions before request-specific content.

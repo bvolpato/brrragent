@@ -13,7 +13,7 @@ Provides:
 Backends (importable individually):
   - brrragent.openrouter: OpenRouter/OpenAI-compatible backend
   - brrragent.openai_direct: OpenAI native backend
-  - brrragent.codex_oauth: ChatGPT/Codex OAuth backend via OpenCode auth
+  - brrragent.codex_oauth: ChatGPT/Codex OAuth backend via isolated auth
   - brrragent.gemini: Google Gemini direct backend
   - brrragent.keys: API key utilities
 """
