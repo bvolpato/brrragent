@@ -1,3 +1,4 @@
+import inspect
 import sys
 from copy import deepcopy
 from types import SimpleNamespace
@@ -110,12 +111,33 @@ def run_with_defaults(*, mcp, **overrides):
     return run_openai_agent(**kwargs)
 
 
-def test_openai_sdk_exposes_adapter_clients():
+def test_openai_sdk_signatures_accept_adapter_kwargs():
     from openai import OpenAI
 
+    prompt_cache = PromptCacheConfig("workflow:v2")
+    chat_kwargs = _build_chat_kwargs(
+        model="openai/gpt-4o",
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[],
+        temperature=0.4,
+        max_tokens=4096,
+        response_format=None,
+        prompt_cache=prompt_cache,
+    )
+    responses_kwargs = _build_responses_kwargs(
+        model="openai/gpt-5.6-luna:medium",
+        input_items=[{"role": "user", "content": "dynamic"}],
+        instructions="stable system",
+        tools=[],
+        temperature=0.4,
+        max_tokens=1000,
+        response_schema={"type": "object", "properties": {}},
+        prompt_cache=prompt_cache,
+    )
+
     with OpenAI(api_key="not-a-real-key") as client:
-        assert callable(client.chat.completions.create)
-        assert callable(client.responses.create)
+        inspect.signature(client.chat.completions.create).bind(**chat_kwargs)
+        inspect.signature(client.responses.create).bind(**responses_kwargs)
 
 
 def test_parse_openai_model_strips_prefix_and_reasoning_suffix():

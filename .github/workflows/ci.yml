@@ -125,7 +125,7 @@ jobs:
         run: uv sync --all-extras --dev --locked --python 3.12
 
       - name: Install minimum provider SDKs
-        run: uv pip install "openai==1.66.0" "google-genai==1.0.0"
+        run: uv pip install "openai==2.45.0" "google-genai==1.0.0"
 
       - name: Run tests with minimum provider SDKs
         run: uv run --no-sync pytest -q
