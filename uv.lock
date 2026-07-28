@@ -75,7 +75,7 @@ provides-extras = ["gemini"]
 [package.metadata.requires-dev]
 dev = [
     { name = "check-wheel-contents", specifier = ">=0.6,<0.7" },
-    { name = "pytest", specifier = ">=9.1.1" },
+    { name = "pytest", specifier = ">=8.0.0" },
     { name = "pytest-cov", specifier = ">=7,<8" },
     { name = "ruff", specifier = ">=0.16,<0.17" },
     { name = "twine", specifier = ">=6,<7" },
