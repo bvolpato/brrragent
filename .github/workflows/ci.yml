@@ -68,8 +68,26 @@ jobs:
           uv venv "$sdist_env"
           uv pip install --python "$wheel_env/bin/python" "${wheel}[gemini]"
           uv pip install --python "$sdist_env/bin/python" "${sdist}[gemini]"
-          "$wheel_env/bin/python" -c "from brrragent import PromptCacheConfig, run_agent; import brrragent.gemini"
-          "$sdist_env/bin/python" -c "from brrragent import PromptCacheConfig, run_agent; import brrragent.gemini"
+          smoke_code='
+          from brrragent import KeyPool, McpServerConfig, PromptCacheConfig, run_agent
+          import brrragent.agent
+          import brrragent.auth_cli
+          import brrragent.codex_oauth
+          import brrragent.gemini
+          import brrragent.keys
+          import brrragent.mcp_tools
+          import brrragent.openai_direct
+          import brrragent.openrouter
+          import brrragent.prompt_cache
+
+          assert KeyPool(["smoke-key"]).acquire() == "smoke-key"
+          assert PromptCacheConfig("smoke:v1").mode == "explicit"
+          assert McpServerConfig(
+              name="local", transport="stdio", command="true"
+          ).command == "true"
+          '
+          "$wheel_env/bin/python" -c "$smoke_code"
+          "$sdist_env/bin/python" -c "$smoke_code"
           "$wheel_env/bin/brrragent-auth" --help
           "$sdist_env/bin/brrragent-auth" --help
 
