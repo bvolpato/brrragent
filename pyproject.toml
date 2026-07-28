@@ -16,7 +16,7 @@ dependencies = [
 brrragent-auth = "brrragent.auth_cli:main"
 
 [project.optional-dependencies]
-gemini = ["google-genai>=1.0.0"]
+gemini = ["google-genai>=1.0.0,<3"]
 
 [dependency-groups]
 dev = [
