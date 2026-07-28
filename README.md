@@ -192,7 +192,7 @@ from brrragent import (
 - `httpx>=0.27.1,<1`
 - `mcp>=1.28.1,<2`
 - `openai>=2.45.0,<3`
-- `google-genai>=1.0.0` for the `gemini` extra
+- `google-genai>=1.0.0,<3` for the `gemini` extra
 
 ## License
 
