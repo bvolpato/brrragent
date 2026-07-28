@@ -189,8 +189,9 @@ from brrragent import (
 ## Requirements
 
 - Python 3.12 or newer
+- `httpx>=0.27.1,<1`
 - `mcp>=1.28.1,<2`
-- `openai>=1.66.0`
+- `openai>=2.45.0,<3`
 - `google-genai>=1.0.0` for the `gemini` extra
 
 ## License
