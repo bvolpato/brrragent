@@ -21,7 +21,7 @@ gemini = ["google-genai>=1.0.0,<3"]
 [dependency-groups]
 dev = [
     "check-wheel-contents>=0.6,<0.7",
-    "pytest>=8.0.0",
+    "pytest>=9.1.1",
     "pytest-cov>=7,<8",
     "ruff>=0.16,<0.17",
     "twine>=6,<7",
