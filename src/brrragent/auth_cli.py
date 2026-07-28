@@ -208,6 +208,29 @@ def _stage_auth(path: Path, value: dict[str, Any]) -> Path:
     return pending
 
 
+def _stage_backup(path: Path) -> Path | None:
+    if not path.exists():
+        return None
+
+    backup = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".backup",
+            delete=False,
+        ) as backup_file:
+            backup_file.write(path.read_bytes())
+            backup = Path(backup_file.name)
+        backup.chmod(0o600)
+    except Exception:
+        if backup:
+            backup.unlink(missing_ok=True)
+        raise
+    return backup
+
+
 def _write_auth_documents(
     direct_path: Path,
     cli_path: Path,
@@ -218,14 +241,40 @@ def _write_auth_documents(
         raise ValueError("Direct and Codex CLI auth paths must differ")
 
     staged: list[tuple[Path, Path]] = []
+    backups: list[tuple[Path | None, Path]] = []
+    replaced: list[tuple[Path, Path | None]] = []
+    preserved_backups: set[Path] = set()
     try:
         staged.append((_stage_auth(direct_path, direct_auth), direct_path))
         staged.append((_stage_auth(cli_path, cli_auth), cli_path))
-        for pending, target in staged:
+        for _pending, target in staged:
+            backups.append((_stage_backup(target), target))
+        for (pending, target), (backup, _backup_target) in zip(
+            staged, backups, strict=True
+        ):
             os.replace(pending, target)
+            replaced.append((target, backup))
+    except Exception as exc:
+        for target, backup in reversed(replaced):
+            try:
+                if backup is None:
+                    target.unlink(missing_ok=True)
+                else:
+                    os.replace(backup, target)
+            except Exception as rollback_exc:
+                if backup is not None and backup.exists():
+                    preserved_backups.add(backup)
+                exc.add_note(
+                    f"Credential rollback failed for {target}: {rollback_exc}; "
+                    f"backup preserved at {backup}"
+                )
+        raise
     finally:
         for pending, _target in staged:
             pending.unlink(missing_ok=True)
+        for backup, _target in backups:
+            if backup and backup not in preserved_backups:
+                backup.unlink(missing_ok=True)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

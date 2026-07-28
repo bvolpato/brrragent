@@ -1,8 +1,10 @@
+import io
 import json
 import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from urllib.error import HTTPError
 
 import pytest
 
@@ -21,6 +23,7 @@ from brrragent.codex_oauth import (
     _is_codex_spark_model,
     _parse_codex_cli_jsonl,
     _run_codex_cli_spark_completion,
+    _stream_codex_response,
     _sync_codex_cli_auth,
     _write_auth_file,
     codex_auth_context,
@@ -118,6 +121,37 @@ def test_per_call_auth_paths_override_environment(monkeypatch, tmp_path):
         assert _codex_cli_auth_path() == codex_home / "auth.json"
 
     assert "environment-profile" in str(_auth_path())
+
+
+def test_concurrent_auth_contexts_do_not_cross_accounts(tmp_path):
+    configs = []
+    expected = []
+    for suffix in ("a", "b"):
+        profile_dir = tmp_path / f"profile-{suffix}"
+        profile_dir.mkdir()
+        auth_path = profile_dir / "auth.json"
+        _write_direct_auth(auth_path, account_id=f"acct-{suffix}")
+        configs.append(
+            CodexAuthConfig(
+                auth_path=auth_path,
+                codex_home=profile_dir / "codex-home",
+            )
+        )
+        expected.append(("access.header.signature", f"acct-{suffix}", auth_path))
+
+    barrier = threading.Barrier(2)
+
+    def load_auth(config):
+        with codex_auth_context(config):
+            barrier.wait(timeout=10)
+            result = (*_get_codex_access_token(), _auth_path())
+            barrier.wait(timeout=10)
+            return result
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(load_auth, configs))
+
+    assert results == expected
 
 
 def test_codex_auth_config_rejects_ambiguous_selection(tmp_path):
@@ -663,6 +697,119 @@ def test_extract_response_text_and_function_calls():
     assert _extract_function_calls(response)[0]["name"] == "search"
 
 
+def test_stream_codex_response_parses_sse_result(monkeypatch):
+    events = [
+        b"event: response.output_text.delta\n",
+        b"data: {malformed\n",
+        b'data: {"type":"response.output_text.delta","delta":"Hello"}\n',
+        b'data: {"type":"response.output_text.delta","delta":" world"}\n',
+        b"data: "
+        + json.dumps(
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_123",
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [
+                                {"type": "output_text", "text": "fallback text"}
+                            ],
+                        }
+                    ],
+                    "usage": {
+                        "input_tokens": 12,
+                        "output_tokens": 3,
+                        "total_tokens": 15,
+                        "input_tokens_details": {"cached_tokens": 4},
+                    },
+                },
+            }
+        ).encode()
+        + b"\n",
+        b"data: "
+        + json.dumps(
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "search",
+                    "arguments": '{"q":"test"}',
+                },
+            }
+        ).encode()
+        + b"\n",
+        b"data: [DONE]\n",
+        b'data: {"type":"response.output_text.delta","delta":" ignored"}\n',
+    ]
+    captured = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            return iter(events)
+
+    def fake_urlopen(req, timeout):
+        captured["req"] = req
+        captured["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setattr("brrragent.codex_oauth.request.urlopen", fake_urlopen)
+
+    result = _stream_codex_response(
+        {"model": "gpt-5.4", "stream": True},
+        {"Authorization": "Bearer test-token"},
+        timeout=47,
+    )
+
+    assert result["id"] == "resp_123"
+    assert result["text"] == "Hello world"
+    assert result["function_calls"] == [
+        {
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "search",
+            "arguments": '{"q":"test"}',
+        }
+    ]
+    assert result["usage"].input_tokens == 12
+    assert result["usage"].output_tokens == 3
+    assert result["usage"].total_tokens == 15
+    assert result["usage"].cache_read_input_tokens == 4
+    assert captured["timeout"] == 47
+    assert json.loads(captured["req"].data) == {
+        "model": "gpt-5.4",
+        "stream": True,
+    }
+    assert captured["req"].get_header("Authorization") == "Bearer test-token"
+
+
+def test_stream_codex_response_reports_http_error(monkeypatch):
+    def fail_urlopen(_req, timeout):
+        assert timeout == 31
+        raise HTTPError(
+            "https://chatgpt.com/backend-api/codex/responses",
+            429,
+            "Too Many Requests",
+            hdrs=None,
+            fp=io.BytesIO(b'{"error":"usage_limit_reached"}'),
+        )
+
+    monkeypatch.setattr("brrragent.codex_oauth.request.urlopen", fail_urlopen)
+
+    with pytest.raises(
+        ValueError,
+        match=r'Codex Responses failed: HTTP 429; \{"error":"usage_limit_reached"\}',
+    ):
+        _stream_codex_response({}, {}, timeout=31)
+
+
 def test_has_opencode_oauth_reads_configured_path(tmp_path, monkeypatch):
     auth_path = tmp_path / "auth.json"
     auth_path.write_text(
@@ -755,3 +902,74 @@ def test_get_codex_access_token_persists_rotated_refresh(tmp_path, monkeypatch):
     assert saved["openai"]["access"] == "access_new"
     assert saved["openai"]["refresh"] == "rt_new"
     assert saved["openai"]["expires"] > 1
+
+
+def test_get_codex_access_token_refreshes_once_across_threads(tmp_path, monkeypatch):
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(
+        json.dumps(
+            {
+                "openai": {
+                    "type": "oauth",
+                    "refresh": "rt_old",
+                    "access": "access_old",
+                    "expires": 1,
+                    "accountId": "acct_1",
+                }
+            }
+        )
+    )
+    monkeypatch.setenv("BRRRAGENT_OPENCODE_AUTH_PATH", str(auth_path))
+    monkeypatch.setenv("BRRRAGENT_CODEX_HOME", str(tmp_path / "codex-home"))
+
+    worker_count = 6
+    start = threading.Barrier(worker_count)
+    refresh_entered = threading.Event()
+    allow_response = threading.Event()
+    call_lock = threading.Lock()
+    refresh_calls = 0
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "access_token": "access_new",
+                    "refresh_token": "rt_new",
+                    "expires_in": 3600,
+                }
+            ).encode()
+
+    def fake_urlopen(_req, timeout):
+        nonlocal refresh_calls
+        assert timeout == 60
+        with call_lock:
+            refresh_calls += 1
+        refresh_entered.set()
+        assert allow_response.wait(timeout=10)
+        return Response()
+
+    def load_auth():
+        start.wait(timeout=10)
+        return _get_codex_access_token()
+
+    monkeypatch.setattr("brrragent.codex_oauth.request.urlopen", fake_urlopen)
+
+    with ThreadPoolExecutor(max_workers=worker_count) as pool:
+        futures = [pool.submit(load_auth) for _ in range(worker_count)]
+        try:
+            assert refresh_entered.wait(timeout=10)
+        finally:
+            allow_response.set()
+        results = [future.result(timeout=10) for future in futures]
+
+    assert results == [("access_new", "acct_1")] * worker_count
+    assert refresh_calls == 1
+    saved = json.loads(auth_path.read_text())
+    assert saved["openai"]["access"] == "access_new"
+    assert saved["openai"]["refresh"] == "rt_new"
