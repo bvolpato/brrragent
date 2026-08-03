@@ -213,6 +213,11 @@ class McpToolCaller:
                         raise ValueError(
                             f"Unknown MCP worker operation: {command.operation}"
                         )
+                except asyncio.CancelledError as exc:
+                    command.future.set_exception(
+                        ConnectionError("MCP operation was cancelled by its transport")
+                    )
+                    logger.debug("MCP transport cancelled an operation", exc_info=exc)
                 except Exception as exc:  # noqa: BLE001 - propagate through Future
                     command.future.set_exception(exc)
                 else:
@@ -270,11 +275,20 @@ class McpToolCaller:
         connection = await self._ensure_connection(server, connections)
         if connection.session is None:
             return self._legacy_call_tool(server, remote_name, arguments)
-        return await connection.session.call_tool(
-            remote_name,
-            arguments,
-            read_timeout_seconds=timedelta(seconds=server.read_timeout),
-        )
+        try:
+            return await connection.session.call_tool(
+                remote_name,
+                arguments,
+                read_timeout_seconds=timedelta(seconds=server.read_timeout),
+            )
+        except BaseException:
+            connections.pop(server.name, None)
+            if connection.stack is not None:
+                try:
+                    await connection.stack.aclose()
+                except BaseException:
+                    logger.debug("MCP failed session cleanup failed", exc_info=True)
+            raise
 
     async def _ensure_connection(
         self,

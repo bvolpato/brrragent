@@ -1,5 +1,7 @@
+import asyncio
 import sys
 import urllib.error
+from concurrent.futures import Future
 from contextlib import asynccontextmanager
 from threading import Event, Thread
 from types import SimpleNamespace
@@ -7,7 +9,12 @@ from types import SimpleNamespace
 import pytest
 
 from brrragent import mcp_tools
-from brrragent.mcp_tools import McpServerConfig, McpToolCaller, _clean_schema
+from brrragent.mcp_tools import (
+    McpServerConfig,
+    McpToolCaller,
+    _clean_schema,
+    _WorkerCommand,
+)
 
 
 def test_clean_schema_removes_unsupported_keys_recursively():
@@ -452,3 +459,21 @@ def test_concurrent_close_does_not_leave_a_caller_blocked():
 
     assert not request_thread.is_alive()
     assert all(not thread.is_alive() for thread in close_threads)
+
+
+def test_transport_cancellation_resolves_request_and_keeps_worker_alive():
+    class CancelledCaller(FakeMcpToolCaller):
+        async def _call(self, connections, *arguments):
+            raise asyncio.CancelledError("transport failed")
+
+    caller = CancelledCaller([])
+    call_future = Future()
+    close_future = Future()
+    caller._commands.put(_WorkerCommand("call", ("server", "tool", {}), call_future))
+    caller._commands.put(_WorkerCommand("close", (), close_future))
+
+    asyncio.run(caller._worker())
+
+    with pytest.raises(ConnectionError, match="cancelled by its transport"):
+        call_future.result()
+    assert close_future.result() is None
