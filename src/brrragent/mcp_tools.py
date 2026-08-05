@@ -13,17 +13,17 @@ from collections.abc import Iterable, Mapping
 from concurrent.futures import Future
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
-from datetime import timedelta
 from fnmatch import fnmatchcase
 from queue import Empty, Queue
 from threading import Lock, RLock, Thread
 from typing import Any, ClassVar, Literal, Self, cast
 
-import httpx
+import httpx2
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
+from mcp.types import PaginatedRequestParams
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +56,7 @@ class McpServerConfig:
     env: Mapping[str, str] | None = None
     cwd: str | None = None
     headers: Mapping[str, str] = field(default_factory=dict)
-    auth: httpx.Auth | None = None
+    auth: httpx2.Auth | None = None
     tool_prefix: str = ""
     timeout: float = 30
     read_timeout: float = 300
@@ -279,7 +279,7 @@ class McpToolCaller:
             return await connection.session.call_tool(
                 remote_name,
                 arguments,
-                read_timeout_seconds=timedelta(seconds=server.read_timeout),
+                read_timeout_seconds=server.read_timeout,
             )
         except BaseException:
             connections.pop(server.name, None)
@@ -357,14 +357,17 @@ class McpToolCaller:
                 )
             else:
                 http_client = await stack.enter_async_context(
-                    httpx.AsyncClient(
+                    httpx2.AsyncClient(
                         headers={"User-Agent": "brrragent/1.0", **server.headers},
                         auth=server.auth,
                         follow_redirects=True,
-                        timeout=httpx.Timeout(server.timeout, read=server.read_timeout),
+                        timeout=httpx2.Timeout(
+                            server.timeout,
+                            read=server.read_timeout,
+                        ),
                     )
                 )
-                read_stream, write_stream, _ = await stack.enter_async_context(
+                read_stream, write_stream = await stack.enter_async_context(
                     streamable_http_client(
                         server.url or "",
                         http_client=http_client,
@@ -376,7 +379,7 @@ class McpToolCaller:
                 ClientSession(
                     read_stream,
                     write_stream,
-                    read_timeout_seconds=timedelta(seconds=server.read_timeout),
+                    read_timeout_seconds=server.read_timeout,
                 )
             )
             await session.initialize()
@@ -535,9 +538,10 @@ async def _list_all_tools(session: ClientSession) -> list[Any]:
     tools: list[Any] = []
     cursor: str | None = None
     while True:
-        result = await session.list_tools(cursor=cursor)
+        params = PaginatedRequestParams(cursor=cursor) if cursor else None
+        result = await session.list_tools(params=params)
         tools.extend(result.tools)
-        cursor = result.nextCursor
+        cursor = result.next_cursor
         if not cursor:
             return tools
 

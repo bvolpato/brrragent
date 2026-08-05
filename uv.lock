@@ -45,6 +45,7 @@ version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
+    { name = "httpx2" },
     { name = "mcp" },
     { name = "openai" },
 ]
@@ -67,6 +68,7 @@ dev = [
 requires-dist = [
     { name = "google-genai", marker = "extra == 'gemini'", specifier = ">=1.0.0,<3" },
     { name = "httpx", specifier = ">=0.27.1,<1" },
+    { name = "httpx2", specifier = ">=2.5,<3" },
     { name = "mcp", specifier = ">=2.0.0,<3" },
     { name = "openai", specifier = ">=2.45.0,<3" },
 ]

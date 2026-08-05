@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from threading import Event, Thread
 from types import SimpleNamespace
 
+import httpx2
 import pytest
 
 from brrragent import mcp_tools
@@ -305,15 +306,23 @@ def test_duplicate_tool_names_require_prefixes():
 
 
 def test_streamable_http_initializes_once_and_reuses_session(monkeypatch):
+    clients = []
     sessions = []
 
     @asynccontextmanager
     async def fake_streamable_http_client(url, **kwargs):
         assert url == "https://mcp.example.test"
-        yield object(), object(), lambda: "session-id"
+        http_client = kwargs["http_client"]
+        assert isinstance(http_client, httpx2.AsyncClient)
+        assert http_client.headers["User-Agent"] == "brrragent/1.0"
+        assert http_client.timeout.connect == 7
+        assert http_client.timeout.read == 42
+        clients.append(http_client)
+        yield object(), object()
 
     class FakeSession:
         def __init__(self, *args, **kwargs):
+            assert kwargs["read_timeout_seconds"] == 42
             self.initialize_count = 0
             self.call_count = 0
             sessions.append(self)
@@ -328,7 +337,8 @@ def test_streamable_http_initializes_once_and_reuses_session(monkeypatch):
             self.initialize_count += 1
             return SimpleNamespace(protocolVersion="2025-11-25")
 
-        async def list_tools(self, cursor=None):
+        async def list_tools(self, *, params=None):
+            assert params is None
             return SimpleNamespace(
                 tools=[
                     {
@@ -337,10 +347,11 @@ def test_streamable_http_initializes_once_and_reuses_session(monkeypatch):
                         "inputSchema": {"type": "object"},
                     }
                 ],
-                nextCursor=None,
+                next_cursor=None,
             )
 
         async def call_tool(self, name, arguments, **kwargs):
+            assert kwargs["read_timeout_seconds"] == 42
             self.call_count += 1
             return {"content": [{"type": "text", "text": "ok"}]}
 
@@ -352,12 +363,21 @@ def test_streamable_http_initializes_once_and_reuses_session(monkeypatch):
     monkeypatch.setattr(mcp_tools, "ClientSession", FakeSession)
 
     with McpToolCaller(
-        endpoint="https://mcp.example.test",
-        transport="streamable_http",
+        servers=[
+            McpServerConfig(
+                name="streamable-test",
+                url="https://mcp.example.test",
+                transport="streamable_http",
+                auth=httpx2.BasicAuth("user", "password"),
+                timeout=7,
+                read_timeout=42,
+            )
+        ]
     ) as caller:
         assert [tool["name"] for tool in caller.get_filtered_schemas()] == ["lookup"]
         assert caller.call_tool("lookup", {}) == "ok"
 
+    assert clients[0].is_closed
     assert len(sessions) == 1
     assert sessions[0].initialize_count == 1
     assert sessions[0].call_count == 1
@@ -390,8 +410,8 @@ def test_auto_transport_falls_back_to_sse(monkeypatch):
         async def initialize(self):
             return SimpleNamespace(protocolVersion="2025-11-25")
 
-        async def list_tools(self, cursor=None):
-            return SimpleNamespace(tools=[{"name": "lookup"}], nextCursor=None)
+        async def list_tools(self, *, params=None):
+            return SimpleNamespace(tools=[{"name": "lookup"}], next_cursor=None)
 
     monkeypatch.setattr(
         mcp_tools,
@@ -407,11 +427,28 @@ def test_auto_transport_falls_back_to_sse(monkeypatch):
     assert attempts == ["streamable_http", "sse"]
 
 
+def test_list_all_tools_uses_v2_pagination_params():
+    cursors = []
+
+    class FakeSession:
+        async def list_tools(self, *, params=None):
+            cursor = params.cursor if params is not None else None
+            cursors.append(cursor)
+            if cursor is None:
+                return SimpleNamespace(tools=[{"name": "first"}], next_cursor="next")
+            return SimpleNamespace(tools=[{"name": "second"}], next_cursor=None)
+
+    tools = asyncio.run(mcp_tools._list_all_tools(FakeSession()))
+
+    assert tools == [{"name": "first"}, {"name": "second"}]
+    assert cursors == [None, "next"]
+
+
 def test_stdio_server_initializes_lists_and_calls_tool():
     server_code = """
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
-server = FastMCP("stdio-test")
+server = MCPServer("stdio-test")
 
 @server.tool()
 def echo(value: str) -> str:

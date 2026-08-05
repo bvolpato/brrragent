@@ -163,6 +163,10 @@ POST compatibility. Standard transports use MCP initialization, version
 negotiation, persistent sessions, and clean shutdown. Duplicate visible tool
 names require `tool_prefix` configuration.
 
+HTTP auth objects in `McpServerConfig` use `httpx2.Auth`, matching MCP SDK v2.
+HTTP transports use the operating system trust store; set `SSL_CERT_FILE` or
+`SSL_CERT_DIR` for custom certificate authorities.
+
 `BRRRAGENT_MCP_URL` configures one default endpoint. `BRRRAGENT_MCP_URLS`
 accepts comma-separated endpoints.
 
@@ -190,7 +194,8 @@ from brrragent import (
 
 - Python 3.12 or newer
 - `httpx>=0.27.1,<1`
-- `mcp>=1.28.1,<2`
+- `httpx2>=2.5,<3`
+- `mcp>=2.0.0,<3`
 - `openai>=2.45.0,<3`
 - `google-genai>=1.0.0,<3` for the `gemini` extra
 
