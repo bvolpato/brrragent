@@ -1,5 +1,8 @@
 import asyncio
+import socket
+import subprocess
 import sys
+import time
 import urllib.error
 from concurrent.futures import Future
 from contextlib import asynccontextmanager
@@ -468,6 +471,82 @@ server.run(transport="stdio")
     ) as caller:
         assert [tool["name"] for tool in caller.get_filtered_schemas()] == ["echo"]
         assert caller.call_tool("echo", {"value": "hello"}) == "hello"
+
+
+def _wait_for_server(process, port):
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            _, stderr = process.communicate()
+            pytest.fail(f"MCP server exited during startup:\n{stderr}")
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.1):
+                return
+        except OSError:
+            time.sleep(0.05)
+    pytest.fail("MCP server did not start within 10 seconds")
+
+
+@pytest.mark.parametrize(
+    ("server_transport", "client_transport", "path"),
+    [
+        ("streamable-http", "streamable_http", "/mcp"),
+        ("sse", "sse", "/sse"),
+    ],
+)
+def test_http_server_initializes_lists_and_calls_tool(
+    server_transport,
+    client_transport,
+    path,
+):
+    with socket.socket() as port_socket:
+        port_socket.bind(("127.0.0.1", 0))
+        port = port_socket.getsockname()[1]
+
+    server_code = """
+import sys
+from mcp.server.mcpserver import MCPServer
+
+server = MCPServer("http-test", log_level="ERROR")
+
+@server.tool()
+def echo(value: str) -> str:
+    return value
+
+server.run(
+    transport=sys.argv[1],
+    host="127.0.0.1",
+    port=int(sys.argv[2]),
+)
+"""
+    process = subprocess.Popen(
+        [sys.executable, "-c", server_code, server_transport, str(port)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        _wait_for_server(process, port)
+        with McpToolCaller(
+            servers=[
+                McpServerConfig(
+                    name="http-test",
+                    transport=client_transport,
+                    url=f"http://127.0.0.1:{port}{path}",
+                    timeout=5,
+                    read_timeout=5,
+                )
+            ]
+        ) as caller:
+            assert [tool["name"] for tool in caller.get_filtered_schemas()] == ["echo"]
+            assert caller.call_tool("echo", {"value": "hello"}) == "hello"
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
 
 
 def test_concurrent_close_does_not_leave_a_caller_blocked():

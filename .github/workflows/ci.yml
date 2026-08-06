@@ -97,7 +97,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.12", "3.13"]
+        python-version: ["3.12", "3.13", "3.14"]
 
     steps:
       - name: Check out repository
@@ -142,10 +142,16 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-extras --dev --locked --python 3.12
 
-      - name: Install minimum provider SDKs
-        run: uv pip install "openai==2.45.0" "google-genai==1.0.0"
+      - name: Install minimum dependencies
+        run: |
+          uv pip install \
+            "httpx==0.27.1" \
+            "httpx2==2.5.0" \
+            "mcp==2.0.0" \
+            "openai==2.45.0" \
+            "google-genai==1.0.0"
 
-      - name: Run tests with minimum provider SDKs
+      - name: Run tests with minimum dependencies
         run: uv run --no-sync pytest -q
 
   gitleaks:
