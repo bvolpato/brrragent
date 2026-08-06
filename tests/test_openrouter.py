@@ -258,6 +258,7 @@ def test_openrouter_agent_rotates_key_and_completes_tool_loop(monkeypatch):
     assert pool.rate_limited == ["first-fake-key"]
     assert factory.client_keys[0] == "first-fake-key"
     assert set(factory.client_keys[1:]) == {"second-fake-key"}
+    assert all(call["client_kwargs"]["max_retries"] == 0 for call in factory.calls)
     assert mcp.calls == [("lookup", {"query": "brrragent"})]
     assert tool_events == mcp.calls
     assert usages == [
