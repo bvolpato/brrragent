@@ -78,6 +78,7 @@ def run_openrouter_agent(
         api_key=selected_key,
         base_url=base_url,
         timeout=120.0,
+        max_retries=0,
         default_headers={"X-Title": "brrragent"},
     )
 
@@ -134,6 +135,7 @@ def run_openrouter_agent(
                     api_key=selected_key,
                     base_url=base_url,
                     timeout=120.0,
+                    max_retries=0,
                     default_headers={"X-Title": "brrragent"},
                 )
         else:
@@ -260,6 +262,7 @@ def _call_with_retry(
                     api_key=current_key,
                     base_url=base_url,
                     timeout=120.0,
+                    max_retries=0,
                     default_headers={"X-Title": "brrragent"},
                 )
                 logger.info(
