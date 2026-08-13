@@ -225,6 +225,18 @@ jobs:
           name: distributions
           path: dist/
 
+      - name: Verify remote release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          remote_tag=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_REF_NAME}" --jq .sha)
+          target=$(gh release view "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" --json targetCommitish --jq .targetCommitish)
+          test "$remote_tag" = "${GITHUB_SHA}"
+          test "$target" = "${GITHUB_SHA}"
+
       - name: Check existing PyPI files
         id: existing
         run: |
