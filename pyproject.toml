@@ -1,6 +1,6 @@
 [project]
 name = "brrragent"
-version = "0.4.2"
+version = "0.5.0"
 description = "Reusable agent loop with multi-provider routing and MCP tool calling"
 readme = "README.md"
 license = "MIT"
