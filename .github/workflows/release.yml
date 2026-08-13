@@ -191,8 +191,11 @@ jobs:
               '.[] | select(.tag_name == $tag) | .id' | head -1)
 
           if [ -z "$release_id" ]; then
-            gh release create "$tag" --repo "$repo" --draft --verify-tag \
-              --target "${GITHUB_SHA}" --title "$tag" --generate-notes
+            if ! gh release create "$tag" --repo "$repo" --draft --verify-tag \
+              --target "${GITHUB_SHA}" --title "$tag" --generate-notes; then
+              printf 'release creation request failed; checking whether GitHub accepted it\n'
+            fi
+
             for attempt in $(seq 1 12); do
               release_id=$(gh api "repos/${repo}/releases?per_page=100" |
                 jq --raw-output --arg tag "$tag" \
@@ -207,7 +210,16 @@ jobs:
             done
           fi
 
-          release=$(gh api "repos/${repo}/releases/${release_id}")
+          test -n "$release_id"
+          for attempt in $(seq 1 12); do
+            if release=$(gh api "repos/${repo}/releases/${release_id}"); then
+              break
+            fi
+            if [ "$attempt" = 12 ]; then
+              exit 1
+            fi
+            sleep 2
+          done
           draft=$(jq --raw-output .draft <<<"$release")
           immutable=$(jq --raw-output .immutable <<<"$release")
           target=$(jq --raw-output .target_commitish <<<"$release")
@@ -227,24 +239,39 @@ jobs:
           fi
 
           assets=$(mktemp)
-          gh api "repos/${repo}/releases/${release_id}/assets?per_page=100" >"$assets"
+          expected_assets=$(find dist -maxdepth 1 -type f -printf '%f\n' | sort)
+          expected_asset_states=$(printf '%s\n' "$expected_assets" | sed $'s/$/\tuploaded/')
           for artifact in dist/*; do
             name=$(basename "$artifact")
-            if ! jq --exit-status --arg name "$name" \
-              '.[] | select(.name == $name)' "$assets" >/dev/null; then
-              encoded_name=$(jq --null-input --raw-output --arg name "$name" '$name | @uri')
+            encoded_name=$(jq --null-input --raw-output --arg name "$name" '$name | @uri')
+            for attempt in $(seq 1 12); do
+              gh api "repos/${repo}/releases/${release_id}/assets?per_page=100" >"$assets"
+              asset_id=$(jq --raw-output --arg name "$name" \
+                '[.[] | select(.name == $name)][0].id // empty' "$assets")
+              asset_state=$(jq --raw-output --arg name "$name" \
+                '[.[] | select(.name == $name)][0].state // empty' "$assets")
+              if [ "$asset_state" = uploaded ]; then
+                break
+              fi
+              if [ -n "$asset_id" ] && \
+                ! gh api --method DELETE "repos/${repo}/releases/assets/${asset_id}"; then
+                sleep 2
+                continue
+              fi
               gh api --method POST -H "Content-Type: application/octet-stream" \
                 --input "$artifact" \
                 "https://uploads.github.com/repos/${repo}/releases/${release_id}/assets?name=${encoded_name}" \
-                >/dev/null
-            fi
+                >/dev/null || true
+              if [ "$attempt" != 12 ]; then
+                sleep 2
+              fi
+            done
           done
 
-          expected_assets=$(find dist -maxdepth 1 -type f -printf '%f\n' | sort)
           for attempt in $(seq 1 12); do
             gh api "repos/${repo}/releases/${release_id}/assets?per_page=100" >"$assets"
-            remote_assets=$(jq --raw-output '.[].name' "$assets" | sort)
-            if [ "$remote_assets" = "$expected_assets" ]; then
+            remote_asset_states=$(jq --raw-output '.[] | [.name, .state] | @tsv' "$assets" | sort)
+            if [ "$remote_asset_states" = "$expected_asset_states" ]; then
               break
             fi
             if [ "$attempt" = 12 ]; then
@@ -294,8 +321,6 @@ jobs:
           path: dist/
 
       - name: Verify remote release tag
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           repo="${GITHUB_REPOSITORY}"
@@ -306,15 +331,9 @@ jobs:
             remote_tag=$(git ls-remote "https://github.com/${repo}.git" \
               "refs/tags/${tag}" | cut -f 1)
           fi
-          release_id=$(gh api "repos/${repo}/releases?per_page=100" |
-            jq --raw-output --arg tag "$tag" \
-              '.[] | select(.tag_name == $tag) | .id' | head -1)
-          test -n "$release_id"
-          target=$(gh api "repos/${repo}/releases/${release_id}" \
-            --jq .target_commitish)
-          if [ "$remote_tag" != "${GITHUB_SHA}" ] || [ "$target" != "${GITHUB_SHA}" ]; then
-            printf 'release verification failed: expected=%s tag=%s target=%s\n' \
-              "${GITHUB_SHA}" "$remote_tag" "$target"
+          if [ "$remote_tag" != "${GITHUB_SHA}" ]; then
+            printf 'release verification failed: expected=%s tag=%s\n' \
+              "${GITHUB_SHA}" "$remote_tag"
             exit 1
           fi
 
