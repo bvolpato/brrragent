@@ -104,9 +104,8 @@ class KeyPool:
                 raise ValueError(f"No active keys in {self._name} pool (all evicted)")
             chosen = random.choice(list(self._active))
             logger.debug(
-                "[%s-pool] Acquired key ...%s (%d active, %d evicted)",
+                "[%s-pool] Acquired key (%d active, %d evicted)",
                 self._name,
-                chosen[-6:],
                 len(self._active),
                 len(self._evicted),
             )
@@ -120,9 +119,8 @@ class KeyPool:
 
             if len(self._active) <= 1:
                 logger.warning(
-                    "[%s-pool] Last key ...%s hit 429 — resetting all %d keys and raising",
+                    "[%s-pool] Last key hit 429; resetting all %d keys and raising",
                     self._name,
-                    key[-6:],
                     len(self._all_keys),
                 )
                 self._active = set(self._all_keys)
@@ -135,9 +133,8 @@ class KeyPool:
             self._active.discard(key)
             self._evicted.add(key)
             logger.warning(
-                "[%s-pool] Evicted key ...%s (429). %d active, %d evicted",
+                "[%s-pool] Evicted key after 429 (%d active, %d evicted)",
                 self._name,
-                key[-6:],
                 len(self._active),
                 len(self._evicted),
             )

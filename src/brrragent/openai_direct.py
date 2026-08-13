@@ -9,6 +9,7 @@ import logging
 import time
 from collections.abc import Callable
 
+from brrragent._errors import safe_error_summary
 from brrragent.keys import KeyPool
 from brrragent.prompt_cache import AgentUsage, PromptCacheConfig, openai_usage
 
@@ -510,23 +511,22 @@ def _call_with_retry(
 
             if _is_rate_limit_error(e) and key_pool:
                 logger.warning(
-                    "[agent] OpenAI 429 on key ...%s (attempt %d/%d): %s",
-                    current_key[-6:],
+                    "[agent] OpenAI 429 (attempt %d/%d): %s",
                     attempt,
                     max_retries,
-                    str(e)[:200],
+                    safe_error_summary(e),
                 )
                 key_pool.report_rate_limit(current_key)
                 current_key = key_pool.acquire()
                 client = _new_openai_client(current_key)
-                logger.info("[agent] Rotated to OpenAI key ...%s", current_key[-6:])
+                logger.info("[agent] Rotated OpenAI key")
                 continue
 
             logger.warning(
                 "[agent] OpenAI call attempt %d/%d failed: %s",
                 attempt,
                 max_retries,
-                str(e)[:200],
+                safe_error_summary(e),
             )
 
             if _is_transient_error(e) and attempt < max_retries:
@@ -536,7 +536,9 @@ def _call_with_retry(
             elif not _is_transient_error(e):
                 raise
 
-    raise ValueError(f"OpenAI call failed after {max_retries} retries: {last_err}")
+    raise ValueError(
+        f"OpenAI call failed after {max_retries} retries: {safe_error_summary(last_err)}"
+    ) from None
 
 
 def _call_responses_with_retry(
@@ -579,23 +581,22 @@ def _call_responses_with_retry(
 
             if _is_rate_limit_error(e) and key_pool:
                 logger.warning(
-                    "[agent] OpenAI 429 on key ...%s (attempt %d/%d): %s",
-                    current_key[-6:],
+                    "[agent] OpenAI 429 (attempt %d/%d): %s",
                     attempt,
                     max_retries,
-                    str(e)[:200],
+                    safe_error_summary(e),
                 )
                 key_pool.report_rate_limit(current_key)
                 current_key = key_pool.acquire()
                 client = _new_openai_client(current_key)
-                logger.info("[agent] Rotated to OpenAI key ...%s", current_key[-6:])
+                logger.info("[agent] Rotated OpenAI key")
                 continue
 
             logger.warning(
                 "[agent] OpenAI Responses attempt %d/%d failed: %s",
                 attempt,
                 max_retries,
-                str(e)[:200],
+                safe_error_summary(e),
             )
 
             if _is_transient_error(e) and attempt < max_retries:
@@ -606,8 +607,9 @@ def _call_responses_with_retry(
                 raise
 
     raise ValueError(
-        f"OpenAI Responses call failed after {max_retries} retries: {last_err}"
-    )
+        f"OpenAI Responses call failed after {max_retries} retries: "
+        f"{safe_error_summary(last_err)}"
+    ) from None
 
 
 def _new_openai_client(api_key: str):

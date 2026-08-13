@@ -12,6 +12,7 @@ import logging
 import time
 from collections.abc import Callable
 
+from brrragent._errors import safe_error_summary
 from brrragent.keys import KeyPool
 from brrragent.prompt_cache import AgentUsage, PromptCacheConfig, gemini_usage
 
@@ -191,11 +192,10 @@ def _call_with_retry(
 
             if _is_rate_limit_error(e) and key_pool:
                 logger.warning(
-                    "[agent] Gemini 429 on key ...%s (attempt %d/%d): %s",
-                    current_key[-6:],
+                    "[agent] Gemini 429 (attempt %d/%d): %s",
                     attempt,
                     max_retries,
-                    err_str[:200],
+                    safe_error_summary(e),
                 )
                 # Evict and get a new key — may raise RateLimitExhausted
                 key_pool.report_rate_limit(current_key)
@@ -204,10 +204,7 @@ def _call_with_retry(
                 from google import genai
 
                 client = genai.Client(api_key=current_key)
-                logger.info(
-                    "[agent] Rotated to key ...%s, retrying immediately",
-                    current_key[-6:],
-                )
+                logger.info("[agent] Rotated Gemini key, retrying immediately")
                 continue
 
             is_transient = any(
@@ -227,7 +224,7 @@ def _call_with_retry(
                 "[agent] Gemini call attempt %d/%d failed: %s",
                 attempt,
                 max_retries,
-                err_str[:200],
+                safe_error_summary(e),
             )
 
             if is_transient and attempt < max_retries:
@@ -237,4 +234,7 @@ def _call_with_retry(
             elif not is_transient:
                 raise
 
-    raise ValueError(f"Gemini API call failed after {max_retries} retries: {last_err}")
+    raise ValueError(
+        f"Gemini API call failed after {max_retries} retries: "
+        f"{safe_error_summary(last_err)}"
+    ) from None
