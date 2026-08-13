@@ -317,6 +317,7 @@ def test_chat_agent_runs_tool_round_trip_and_reports_each_usage(monkeypatch):
         {
             "api_key": "test-key",
             "timeout": 120.0,
+            "max_retries": 0,
             "default_headers": {"X-Title": "brrragent"},
         }
     ]
@@ -451,10 +452,10 @@ def test_chat_agent_rotates_key_after_429(monkeypatch):
             )
         ]
     )
-    constructed_keys = []
+    constructor_calls = []
 
     def openai_factory(**kwargs):
-        constructed_keys.append(kwargs["api_key"])
+        constructor_calls.append(kwargs)
         if kwargs["api_key"] == "key-one":
             return rate_limited_client
         return successful_client
@@ -483,10 +484,65 @@ def test_chat_agent_rotates_key_after_429(monkeypatch):
 
     assert result == "Recovered"
     assert key_pool.rate_limits == ["key-one"]
-    assert constructed_keys[0] == "key-one"
-    assert set(constructed_keys[1:]) == {"key-two"}
+    assert constructor_calls[0]["api_key"] == "key-one"
+    assert {call["api_key"] for call in constructor_calls[1:]} == {"key-two"}
+    assert all(call["max_retries"] == 0 for call in constructor_calls)
     assert len(rate_limited_client.chat.completions.create.calls) == 1
     assert len(successful_client.chat.completions.create.calls) == 1
+
+
+def test_responses_agent_rotates_key_without_sdk_retries(monkeypatch):
+    rate_limited_client = fake_client(
+        response_results=[RuntimeError("429 rate limit exceeded")]
+    )
+    successful_client = fake_client(
+        response_results=[
+            SimpleNamespace(
+                id="resp_final",
+                output=[],
+                output_text="Recovered",
+                usage=None,
+            )
+        ]
+    )
+    constructor_calls = []
+
+    def openai_factory(**kwargs):
+        constructor_calls.append(kwargs)
+        if kwargs["api_key"] == "key-one":
+            return rate_limited_client
+        return successful_client
+
+    install_openai(monkeypatch, openai_factory)
+
+    class FakeKeyPool:
+        def __init__(self):
+            self.keys = iter(["key-one", "key-two"])
+            self.rate_limits = []
+
+        def acquire(self):
+            return next(self.keys)
+
+        def report_rate_limit(self, key):
+            self.rate_limits.append(key)
+
+    key_pool = FakeKeyPool()
+
+    result = run_with_defaults(
+        mcp=FakeMcp(),
+        model="openai/gpt-5.5:high",
+        api_key=None,
+        key_pool=key_pool,
+        max_turns=1,
+    )
+
+    assert result == "Recovered"
+    assert key_pool.rate_limits == ["key-one"]
+    assert constructor_calls[0]["api_key"] == "key-one"
+    assert {call["api_key"] for call in constructor_calls[1:]} == {"key-two"}
+    assert all(call["max_retries"] == 0 for call in constructor_calls)
+    assert len(rate_limited_client.responses.create.calls) == 1
+    assert len(successful_client.responses.create.calls) == 1
 
 
 def test_chat_agent_propagates_non_transient_error_without_retry(monkeypatch):

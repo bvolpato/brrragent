@@ -190,7 +190,8 @@ def run_agent(
         max_turns: Maximum number of tool-calling rounds.
         temperature: Sampling temperature.
         max_tokens: Max tokens per response.
-        max_retries: Retries per API call on transient errors.
+        max_retries: Maximum attempts per API call on transient errors. Provider
+            SDK retries are disabled so this budget is authoritative.
         on_tool_call: Optional callback(tool_name, tool_args) for logging/UI.
         response_schema: JSON Schema dict for structured output (optional).
         prompt_cache: Stable cache key and requested TTL for this prompt version.
