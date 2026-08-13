@@ -375,13 +375,13 @@ jobs:
         run: |
           set -euo pipefail
           metadata=$(mktemp)
-          for attempt in $(seq 1 12); do
+          for attempt in $(seq 1 60); do
             if curl --fail --silent --show-error \
               "https://pypi.org/pypi/brrragent/${GITHUB_REF_NAME#v}/json" \
               >"$metadata"; then
               break
             fi
-            if [ "$attempt" = 12 ]; then
+            if [ "$attempt" = 60 ]; then
               exit 1
             fi
             sleep 5
