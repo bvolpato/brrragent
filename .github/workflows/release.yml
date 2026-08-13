@@ -264,12 +264,11 @@ jobs:
           repo="${GITHUB_REPOSITORY}"
           draft=$(gh release view "$tag" --repo "$repo" --json isDraft --jq .isDraft)
           target=$(gh release view "$tag" --repo "$repo" --json targetCommitish --jq .targetCommitish)
-          remote_tag=$(gh api "repos/${repo}/git/ref/tags/${tag}" --jq .object.sha)
+          remote_tag=$(gh api "repos/${repo}/commits/${tag}" --jq .sha)
           expected_assets=$(find dist -maxdepth 1 -type f -printf '%f\n' | sort)
           actual_assets=$(gh release view "$tag" --repo "$repo" --json assets \
             --jq '.assets[].name' | sort)
 
-          test "$draft" = true
           test "$target" = "${GITHUB_SHA}"
           test "$remote_tag" = "${GITHUB_SHA}"
           test "$actual_assets" = "$expected_assets"
@@ -280,6 +279,11 @@ jobs:
           for artifact in dist/*; do
             cmp "$artifact" "$release_dir/$(basename "$artifact")"
           done
+
+          if [ "$draft" = false ]; then
+            test "$(gh api "repos/${repo}/releases/tags/${tag}" --jq .immutable)" = true
+            exit 0
+          fi
 
           gh release edit "$tag" --repo "$repo" --draft=false --latest
 
