@@ -1,7 +1,7 @@
 import copy
 from types import SimpleNamespace
 
-from brrragent import PromptCacheConfig, openrouter
+from brrragent import ImageInput, PromptCacheConfig, openrouter
 from brrragent.prompt_cache import AgentUsage
 
 
@@ -296,4 +296,43 @@ def test_openrouter_agent_rotates_key_and_completes_tool_loop(monkeypatch):
         "role": "tool",
         "tool_call_id": "tool-call-1",
         "content": "tool result",
+    }
+
+
+def test_openrouter_agent_sends_image_content(monkeypatch):
+    final_response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=FakeMessage(content="mushroom"), finish_reason="stop"
+            )
+        ],
+        usage=None,
+    )
+    factory = FakeOpenAIFactory(final_response, final_response)
+    monkeypatch.setattr("openai.OpenAI", factory)
+
+    result = openrouter.run_openrouter_agent(
+        system_prompt="system",
+        user_prompt="question",
+        model="provider/vision-model",
+        api_key="second-fake-key",
+        base_url="https://provider.example/v1",
+        mcp=FakeMcp(),
+        extra_tools=None,
+        max_turns=1,
+        temperature=0.2,
+        max_tokens=321,
+        max_retries=1,
+        on_tool_call=None,
+        response_schema=None,
+        images=(ImageInput("https://example.test/image.png", detail="high"),),
+    )
+
+    assert result == "mushroom"
+    assert factory.calls[0]["messages"][1]["content"][1] == {
+        "type": "image_url",
+        "image_url": {
+            "url": "https://example.test/image.png",
+            "detail": "high",
+        },
     }

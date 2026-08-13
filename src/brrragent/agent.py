@@ -38,9 +38,10 @@ Usage:
 
 import logging
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING
 
+from brrragent.images import ImageInput
 from brrragent.keys import KeyPool
 from brrragent.mcp_tools import McpToolCaller
 from brrragent.prompt_cache import AgentUsage, PromptCacheConfig
@@ -159,6 +160,7 @@ def run_agent(
     prompt_cache: PromptCacheConfig | None = None,
     on_usage: Callable[[AgentUsage], None] | None = None,
     codex_auth: "CodexAuthConfig | None" = None,
+    images: Sequence[ImageInput] | None = None,
 ) -> str:
     """
     Run an agentic react loop with tool calling.
@@ -197,6 +199,7 @@ def run_agent(
         prompt_cache: Stable cache key and requested TTL for this prompt version.
         on_usage: Optional callback invoked with provider token and cache usage.
         codex_auth: Per-call Codex credential profile or explicit file paths.
+        images: Image URLs, Base64 data URLs, bytes, or files created as ImageInput.
 
     Returns:
         The model's final text response.
@@ -205,6 +208,10 @@ def run_agent(
         ValueError: If all retries are exhausted without a response.
         RateLimitExhausted: If all keys in a pool hit 429.
     """
+    image_inputs = tuple(images or ())
+    if any(not isinstance(image, ImageInput) for image in image_inputs):
+        raise TypeError("images must contain ImageInput values")
+
     if mcp is None:
         from brrragent.mcp_tools import get_default_caller
 
@@ -262,6 +269,7 @@ def run_agent(
             response_schema=response_schema,
             prompt_cache=prompt_cache,
             on_usage=on_usage,
+            images=image_inputs,
         )
 
     if use_codex_oauth:
@@ -282,6 +290,7 @@ def run_agent(
             "response_schema": response_schema,
             "prompt_cache": prompt_cache,
             "on_usage": on_usage,
+            "images": image_inputs,
         }
         if codex_auth is None:
             return run_codex_oauth_agent(**kwargs)
@@ -311,6 +320,7 @@ def run_agent(
             response_schema=response_schema,
             prompt_cache=prompt_cache,
             on_usage=on_usage,
+            images=image_inputs,
         )
 
     # Check for native provider routing (fireworks/, minimax/, etc.)
@@ -347,6 +357,7 @@ def run_agent(
             reasoning_effort=reasoning_effort,
             prompt_cache=None,
             on_usage=on_usage,
+            images=image_inputs,
         )
 
     # Fallback: OpenRouter
@@ -382,4 +393,5 @@ def run_agent(
         response_schema=response_schema,
         prompt_cache=prompt_cache,
         on_usage=on_usage,
+        images=image_inputs,
     )

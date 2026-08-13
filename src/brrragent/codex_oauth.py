@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib import error, parse, request
 
+from brrragent.images import ImageInput, _responses_user_content
 from brrragent.openai_direct import _to_responses_tool, parse_openai_model
 from brrragent.prompt_cache import AgentUsage, PromptCacheConfig, openai_usage
 
@@ -856,11 +857,14 @@ def run_codex_oauth_agent(
     response_schema: dict | None,
     prompt_cache: PromptCacheConfig | None = None,
     on_usage: Callable[[AgentUsage], None] | None = None,
+    images: tuple[ImageInput, ...] = (),
 ) -> str:
     """Run agent against ChatGPT/Codex Responses using managed OAuth."""
     del temperature, max_tokens
 
     if _is_codex_spark_model(model):
+        if images:
+            raise ValueError("codex/gpt-5.3-codex-spark does not support image input")
         tools = mcp.get_openai_tools()
         if tools or extra_tools:
             raise ValueError(
@@ -893,7 +897,7 @@ def run_codex_oauth_agent(
         tools.extend(extra_tools)
 
     input_items = [
-        {"role": "user", "content": [{"type": "input_text", "text": user_prompt}]}
+        {"role": "user", "content": _responses_user_content(user_prompt, images)}
     ]
 
     for turn in range(max_turns):

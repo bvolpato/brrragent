@@ -10,6 +10,7 @@ import time
 from collections.abc import Callable
 
 from brrragent._errors import safe_error_summary
+from brrragent.images import ImageInput, _chat_user_content, _responses_user_content
 from brrragent.keys import KeyPool
 from brrragent.prompt_cache import AgentUsage, PromptCacheConfig, openai_usage
 
@@ -223,6 +224,7 @@ def run_openai_agent(
     response_schema: dict | None,
     prompt_cache: PromptCacheConfig | None = None,
     on_usage: Callable[[AgentUsage], None] | None = None,
+    images: tuple[ImageInput, ...] = (),
 ) -> str:
     """Run the agent using OpenAI's native API."""
     if key_pool is None and api_key is None:
@@ -237,7 +239,7 @@ def run_openai_agent(
 
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
+        {"role": "user", "content": _chat_user_content(user_prompt, images)},
     ]
 
     response_format = None
@@ -269,6 +271,7 @@ def run_openai_agent(
             selected_key=selected_key,
             prompt_cache=prompt_cache,
             on_usage=on_usage,
+            images=images,
         )
 
     for turn in range(max_turns):
@@ -367,9 +370,12 @@ def _run_openai_responses_agent(
     selected_key: str,
     prompt_cache: PromptCacheConfig | None,
     on_usage: Callable[[AgentUsage], None] | None,
+    images: tuple[ImageInput, ...],
 ) -> str:
     previous_response_id = None
-    input_items = [{"role": "user", "content": user_prompt}]
+    input_items = [
+        {"role": "user", "content": _responses_user_content(user_prompt, images)}
+    ]
 
     for turn in range(max_turns):
         bare_model, _ = parse_openai_model(model)
