@@ -203,17 +203,36 @@ jobs:
           draft=$(jq --raw-output .draft <<<"$release")
           immutable=$(jq --raw-output .immutable <<<"$release")
           target=$(jq --raw-output .target_commitish <<<"$release")
-          remote_tag=$(gh api "repos/${repo}/commits/${tag}" --jq .sha)
-          test "$target" = "${GITHUB_SHA}"
-          test "$remote_tag" = "${GITHUB_SHA}"
+          remote_tag=$(git ls-remote "https://github.com/${repo}.git" \
+            "refs/tags/${tag}^{}" | cut -f 1)
+          if [ -z "$remote_tag" ]; then
+            remote_tag=$(git ls-remote "https://github.com/${repo}.git" \
+              "refs/tags/${tag}" | cut -f 1)
+          fi
+          if [ "$target" != "${GITHUB_SHA}" ] || [ "$remote_tag" != "${GITHUB_SHA}" ]; then
+            printf 'release verification failed: expected=%s tag=%s target=%s\n' \
+              "${GITHUB_SHA}" "$remote_tag" "$target"
+            exit 1
+          fi
           if [ "$draft" != true ] && [ "$immutable" != true ]; then
             exit 1
           fi
 
           release_dir=$(mktemp -d)
           while IFS=$'\t' read -r asset_id name; do
-            gh api -H "Accept: application/octet-stream" \
-              "repos/${repo}/releases/assets/${asset_id}" >"${release_dir}/${name}"
+            for attempt in $(seq 1 12); do
+              temporary="${release_dir}/${name}.tmp"
+              if gh api -H "Accept: application/octet-stream" \
+                "repos/${repo}/releases/assets/${asset_id}" >"$temporary"; then
+                mv "$temporary" "${release_dir}/${name}"
+                break
+              fi
+              rm -f "$temporary"
+              if [ "$attempt" = 12 ]; then
+                exit 1
+              fi
+              sleep 2
+            done
           done < <(gh api "repos/${repo}/releases/${release_id}/assets?per_page=100" \
             --jq '.[] | [.id, .name] | @tsv')
           expected_assets=$(find dist -maxdepth 1 -type f -printf '%f\n' | sort)
@@ -248,16 +267,23 @@ jobs:
           set -euo pipefail
           repo="${GITHUB_REPOSITORY}"
           tag="${GITHUB_REF_NAME}"
-          remote_tag=$(gh api \
-            "repos/${repo}/commits/${tag}" --jq .sha)
+          remote_tag=$(git ls-remote "https://github.com/${repo}.git" \
+            "refs/tags/${tag}^{}" | cut -f 1)
+          if [ -z "$remote_tag" ]; then
+            remote_tag=$(git ls-remote "https://github.com/${repo}.git" \
+              "refs/tags/${tag}" | cut -f 1)
+          fi
           release_id=$(gh api "repos/${repo}/releases?per_page=100" |
             jq --raw-output --arg tag "$tag" \
               '.[] | select(.tag_name == $tag) | .id' | head -1)
           test -n "$release_id"
           target=$(gh api "repos/${repo}/releases/${release_id}" \
             --jq .target_commitish)
-          test "$remote_tag" = "${GITHUB_SHA}"
-          test "$target" = "${GITHUB_SHA}"
+          if [ "$remote_tag" != "${GITHUB_SHA}" ] || [ "$target" != "${GITHUB_SHA}" ]; then
+            printf 'release verification failed: expected=%s tag=%s target=%s\n' \
+              "${GITHUB_SHA}" "$remote_tag" "$target"
+            exit 1
+          fi
 
       - name: Check existing PyPI files
         id: existing
@@ -345,16 +371,35 @@ jobs:
           release=$(gh api "repos/${repo}/releases/${release_id}")
           draft=$(jq --raw-output .draft <<<"$release")
           target=$(jq --raw-output .target_commitish <<<"$release")
-          remote_tag=$(gh api "repos/${repo}/commits/${tag}" --jq .sha)
+          remote_tag=$(git ls-remote "https://github.com/${repo}.git" \
+            "refs/tags/${tag}^{}" | cut -f 1)
+          if [ -z "$remote_tag" ]; then
+            remote_tag=$(git ls-remote "https://github.com/${repo}.git" \
+              "refs/tags/${tag}" | cut -f 1)
+          fi
           expected_assets=$(find dist -maxdepth 1 -type f -printf '%f\n' | sort)
 
-          test "$target" = "${GITHUB_SHA}"
-          test "$remote_tag" = "${GITHUB_SHA}"
+          if [ "$target" != "${GITHUB_SHA}" ] || [ "$remote_tag" != "${GITHUB_SHA}" ]; then
+            printf 'release verification failed: expected=%s tag=%s target=%s\n' \
+              "${GITHUB_SHA}" "$remote_tag" "$target"
+            exit 1
+          fi
 
           release_dir=$(mktemp -d)
           while IFS=$'\t' read -r asset_id name; do
-            gh api -H "Accept: application/octet-stream" \
-              "repos/${repo}/releases/assets/${asset_id}" >"${release_dir}/${name}"
+            for attempt in $(seq 1 12); do
+              temporary="${release_dir}/${name}.tmp"
+              if gh api -H "Accept: application/octet-stream" \
+                "repos/${repo}/releases/assets/${asset_id}" >"$temporary"; then
+                mv "$temporary" "${release_dir}/${name}"
+                break
+              fi
+              rm -f "$temporary"
+              if [ "$attempt" = 12 ]; then
+                exit 1
+              fi
+              sleep 2
+            done
           done < <(gh api "repos/${repo}/releases/${release_id}/assets?per_page=100" \
             --jq '.[] | [.id, .name] | @tsv')
           actual_assets=$(find "$release_dir" -maxdepth 1 -type f -printf '%f\n' | sort)
