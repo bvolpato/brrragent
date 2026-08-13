@@ -1,0 +1,269 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev --locked --python 3.12
+
+      - name: Validate tag and version
+        run: |
+          set -euo pipefail
+          version=$(uv run python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          [[ "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([a-zA-Z0-9.-]+)?$ ]]
+          test "${GITHUB_REF_NAME}" = "v${version}"
+          test "$(git rev-list -n 1 "${GITHUB_REF_NAME}")" = "${GITHUB_SHA}"
+          git fetch origin master --no-tags
+          git merge-base --is-ancestor "${GITHUB_SHA}" origin/master
+
+      - name: Validate source
+        run: |
+          uv lock --check
+          uv run ruff check src tests
+          uv run ruff format --check src tests
+          uv run python -m compileall -q src tests
+          uv run pytest -q --cov=brrragent --cov-report=term-missing
+
+      - name: Build and validate distributions
+        run: |
+          uv build --clear
+          uv run twine check dist/*
+          uv run check-wheel-contents dist/*.whl
+
+      - name: Smoke test wheel
+        run: |
+          set -euo pipefail
+          wheel=$(find dist -maxdepth 1 -name '*.whl' -print -quit)
+          smoke_env=$(mktemp -d)
+          uv venv "$smoke_env"
+          uv pip install --python "$smoke_env/bin/python" "${wheel}[gemini]"
+          "$smoke_env/bin/python" - <<'PY'
+          from brrragent import KeyPool, McpServerConfig, PromptCacheConfig, run_agent
+          import brrragent.agent
+          import brrragent.auth_cli
+          import brrragent.codex_oauth
+          import brrragent.gemini
+          import brrragent.keys
+          import brrragent.mcp_tools
+          import brrragent.openai_direct
+          import brrragent.openrouter
+          import brrragent.prompt_cache
+
+          assert KeyPool(["smoke-key"]).acquire() == "smoke-key"
+          assert PromptCacheConfig("smoke:v1").mode == "explicit"
+          assert McpServerConfig(
+              name="local", transport="stdio", command="true"
+          ).command == "true"
+          assert callable(run_agent)
+          PY
+          "$smoke_env/bin/brrragent-auth" --help
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: distributions
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  attest:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: distributions
+          path: dist/
+
+      - name: Attest distributions
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/*
+
+  github-draft:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: distributions
+          path: dist/
+
+      - name: Create or verify draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          repo="${GITHUB_REPOSITORY}"
+
+          if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
+            draft=$(gh release view "$tag" --repo "$repo" --json isDraft --jq .isDraft)
+          else
+            gh release create "$tag" --repo "$repo" --draft --verify-tag \
+              --target "${GITHUB_SHA}" --title "$tag" --generate-notes
+            draft=true
+          fi
+
+          target=$(gh release view "$tag" --repo "$repo" --json targetCommitish --jq .targetCommitish)
+          test "$target" = "${GITHUB_SHA}"
+
+          if [ "$draft" = true ]; then
+            gh release upload "$tag" dist/* --repo "$repo" --clobber
+          fi
+
+          release_dir=$(mktemp -d)
+          gh release download "$tag" --repo "$repo" --dir "$release_dir" \
+            --pattern 'brrragent-*.whl' --pattern 'brrragent-*.tar.gz'
+          for artifact in dist/*; do
+            cmp "$artifact" "$release_dir/$(basename "$artifact")"
+          done
+
+  pypi:
+    needs: [attest, github-draft]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/p/brrragent
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: distributions
+          path: dist/
+
+      - name: Check existing PyPI files
+        id: existing
+        run: |
+          set -euo pipefail
+          metadata=$(mktemp)
+          status=$(curl --silent --show-error --output "$metadata" --write-out '%{http_code}' \
+            "https://pypi.org/pypi/brrragent/${GITHUB_REF_NAME#v}/json")
+
+          if [ "$status" = 404 ]; then
+            echo "present=false" >>"${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          test "$status" = 200
+
+          for artifact in dist/*; do
+            filename=$(basename "$artifact")
+            expected=$(sha256sum "$artifact" | cut -d ' ' -f 1)
+            actual=$(jq --raw-output --arg filename "$filename" \
+              '.urls[] | select(.filename == $filename) | .digests.sha256' \
+              "$metadata")
+            test -n "$actual"
+            test "$actual" = "$expected"
+          done
+          echo "present=true" >>"${GITHUB_OUTPUT}"
+
+      - name: Publish to PyPI
+        if: steps.existing.outputs.present != 'true'
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: dist/
+
+      - name: Verify published digests
+        run: |
+          set -euo pipefail
+          metadata=$(mktemp)
+          for attempt in $(seq 1 12); do
+            if curl --fail --silent --show-error \
+              "https://pypi.org/pypi/brrragent/${GITHUB_REF_NAME#v}/json" \
+              >"$metadata"; then
+              break
+            fi
+            if [ "$attempt" = 12 ]; then
+              exit 1
+            fi
+            sleep 5
+          done
+
+          for artifact in dist/*; do
+            filename=$(basename "$artifact")
+            expected=$(sha256sum "$artifact" | cut -d ' ' -f 1)
+            actual=$(jq --raw-output --arg filename "$filename" \
+              '.urls[] | select(.filename == $filename) | .digests.sha256' \
+              "$metadata")
+            test -n "$actual"
+            test "$actual" = "$expected"
+          done
+
+  github-release:
+    needs: pypi
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Publish immutable GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          repo="${GITHUB_REPOSITORY}"
+          draft=$(gh release view "$tag" --repo "$repo" --json isDraft --jq .isDraft)
+
+          if [ "$draft" = true ]; then
+            gh release edit "$tag" --repo "$repo" --draft=false --latest
+          fi
+
+          for attempt in $(seq 1 12); do
+            immutable=$(gh release view "$tag" --repo "$repo" --json isImmutable --jq .isImmutable)
+            if [ "$immutable" = true ]; then
+              exit 0
+            fi
+            if [ "$attempt" = 12 ]; then
+              exit 1
+            fi
+            sleep 5
+          done
