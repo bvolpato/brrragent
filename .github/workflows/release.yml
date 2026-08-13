@@ -96,6 +96,46 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  ci:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      checks: read
+      contents: read
+
+    steps:
+      - name: Require default-branch CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          expected=$(printf '%s\n' \
+            gitleaks minimum-openai quality \
+            'test (3.12)' 'test (3.13)' 'test (3.14)' | sort)
+
+          for attempt in $(seq 1 60); do
+            checks=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/check-runs" \
+              --paginate --jq '.check_runs[] | select(.name != "ci") | [.name, .status, (.conclusion // "")] | @tsv')
+            names=$(printf '%s\n' "$checks" | cut -f 1 | sort -u)
+
+            if [ "$names" = "$expected" ] && \
+              printf '%s\n' "$checks" | awk -F '\t' '$2 != "completed" || $3 != "success" { exit 1 }'; then
+              exit 0
+            fi
+
+            if printf '%s\n' "$checks" | awk -F '\t' '$2 == "completed" && $3 != "success" { found=1 } END { exit !found }'; then
+              printf '%s\n' "$checks"
+              exit 1
+            fi
+
+            if [ "$attempt" = 60 ]; then
+              printf '%s\n' "$checks"
+              exit 1
+            fi
+            sleep 10
+          done
+
   attest:
     needs: build
     runs-on: ubuntu-latest
@@ -166,7 +206,7 @@ jobs:
           done
 
   pypi:
-    needs: [attest, github-draft]
+    needs: [attest, ci, github-draft]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment:
