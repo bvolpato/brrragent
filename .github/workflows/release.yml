@@ -56,7 +56,12 @@ jobs:
 
       - name: Build and validate distributions
         run: |
+          SOURCE_DATE_EPOCH=$(git show -s --format=%ct "${GITHUB_SHA}")
+          export SOURCE_DATE_EPOCH
           uv build --clear
+          sha256sum dist/* >/tmp/distribution-digests
+          uv build --clear
+          sha256sum --check /tmp/distribution-digests
           uv run twine check dist/*
           uv run check-wheel-contents dist/*.whl
 
@@ -89,7 +94,7 @@ jobs:
           "$smoke_env/bin/brrragent-auth" --help
 
       - name: Upload distributions
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: distributions
           path: dist/
@@ -181,28 +186,38 @@ jobs:
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
           repo="${GITHUB_REPOSITORY}"
+          release_id=$(gh api "repos/${repo}/releases?per_page=100" |
+            jq --raw-output --arg tag "$tag" \
+              '.[] | select(.tag_name == $tag) | .id' | head -1)
 
-          if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
-            draft=$(gh release view "$tag" --repo "$repo" --json isDraft --jq .isDraft)
-          else
+          if [ -z "$release_id" ]; then
             gh release create "$tag" --repo "$repo" --draft --verify-tag \
               --target "${GITHUB_SHA}" --title "$tag" --generate-notes
-            draft=true
+            release_id=$(gh api "repos/${repo}/releases?per_page=100" |
+              jq --raw-output --arg tag "$tag" \
+                '.[] | select(.tag_name == $tag) | .id' | head -1)
+            gh release upload "$tag" dist/* --repo "$repo"
           fi
 
-          target=$(gh release view "$tag" --repo "$repo" --json targetCommitish --jq .targetCommitish)
+          release=$(gh api "repos/${repo}/releases/${release_id}")
+          draft=$(jq --raw-output .draft <<<"$release")
+          immutable=$(jq --raw-output .immutable <<<"$release")
+          target=$(jq --raw-output .target_commitish <<<"$release")
+          remote_tag=$(gh api "repos/${repo}/commits/${tag}" --jq .sha)
           test "$target" = "${GITHUB_SHA}"
-
-          if [ "$draft" = true ]; then
-            gh release upload "$tag" dist/* --repo "$repo" --clobber
+          test "$remote_tag" = "${GITHUB_SHA}"
+          if [ "$draft" != true ] && [ "$immutable" != true ]; then
+            exit 1
           fi
 
           release_dir=$(mktemp -d)
-          gh release download "$tag" --repo "$repo" --dir "$release_dir" \
-            --pattern 'brrragent-*.whl' --pattern 'brrragent-*.tar.gz'
+          while IFS=$'\t' read -r asset_id name; do
+            gh api -H "Accept: application/octet-stream" \
+              "repos/${repo}/releases/assets/${asset_id}" >"${release_dir}/${name}"
+          done < <(gh api "repos/${repo}/releases/${release_id}/assets?per_page=100" \
+            --jq '.[] | [.id, .name] | @tsv')
           expected_assets=$(find dist -maxdepth 1 -type f -printf '%f\n' | sort)
-          actual_assets=$(gh release view "$tag" --repo "$repo" --json assets \
-            --jq '.assets[].name' | sort)
+          actual_assets=$(find "$release_dir" -maxdepth 1 -type f -printf '%f\n' | sort)
           test "$actual_assets" = "$expected_assets"
           for artifact in dist/*; do
             cmp "$artifact" "$release_dir/$(basename "$artifact")"
@@ -231,10 +246,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          repo="${GITHUB_REPOSITORY}"
+          tag="${GITHUB_REF_NAME}"
           remote_tag=$(gh api \
-            "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_REF_NAME}" --jq .sha)
-          target=$(gh release view "${GITHUB_REF_NAME}" \
-            --repo "${GITHUB_REPOSITORY}" --json targetCommitish --jq .targetCommitish)
+            "repos/${repo}/commits/${tag}" --jq .sha)
+          release_id=$(gh api "repos/${repo}/releases?per_page=100" |
+            jq --raw-output --arg tag "$tag" \
+              '.[] | select(.tag_name == $tag) | .id' | head -1)
+          test -n "$release_id"
+          target=$(gh api "repos/${repo}/releases/${release_id}" \
+            --jq .target_commitish)
           test "$remote_tag" = "${GITHUB_SHA}"
           test "$target" = "${GITHUB_SHA}"
 
@@ -317,33 +338,41 @@ jobs:
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
           repo="${GITHUB_REPOSITORY}"
-          draft=$(gh release view "$tag" --repo "$repo" --json isDraft --jq .isDraft)
-          target=$(gh release view "$tag" --repo "$repo" --json targetCommitish --jq .targetCommitish)
+          release_id=$(gh api "repos/${repo}/releases?per_page=100" |
+            jq --raw-output --arg tag "$tag" \
+              '.[] | select(.tag_name == $tag) | .id' | head -1)
+          test -n "$release_id"
+          release=$(gh api "repos/${repo}/releases/${release_id}")
+          draft=$(jq --raw-output .draft <<<"$release")
+          target=$(jq --raw-output .target_commitish <<<"$release")
           remote_tag=$(gh api "repos/${repo}/commits/${tag}" --jq .sha)
           expected_assets=$(find dist -maxdepth 1 -type f -printf '%f\n' | sort)
-          actual_assets=$(gh release view "$tag" --repo "$repo" --json assets \
-            --jq '.assets[].name' | sort)
 
           test "$target" = "${GITHUB_SHA}"
           test "$remote_tag" = "${GITHUB_SHA}"
-          test "$actual_assets" = "$expected_assets"
 
           release_dir=$(mktemp -d)
-          gh release download "$tag" --repo "$repo" --dir "$release_dir" \
-            --pattern 'brrragent-*.whl' --pattern 'brrragent-*.tar.gz'
+          while IFS=$'\t' read -r asset_id name; do
+            gh api -H "Accept: application/octet-stream" \
+              "repos/${repo}/releases/assets/${asset_id}" >"${release_dir}/${name}"
+          done < <(gh api "repos/${repo}/releases/${release_id}/assets?per_page=100" \
+            --jq '.[] | [.id, .name] | @tsv')
+          actual_assets=$(find "$release_dir" -maxdepth 1 -type f -printf '%f\n' | sort)
+          test "$actual_assets" = "$expected_assets"
           for artifact in dist/*; do
             cmp "$artifact" "$release_dir/$(basename "$artifact")"
           done
 
           if [ "$draft" = false ]; then
-            test "$(gh api "repos/${repo}/releases/tags/${tag}" --jq .immutable)" = true
+            test "$(gh api "repos/${repo}/releases/${release_id}" --jq .immutable)" = true
             exit 0
           fi
 
-          gh release edit "$tag" --repo "$repo" --draft=false --latest
+          gh api "repos/${repo}/releases/${release_id}" --method PATCH --input - \
+            <<<'{"draft":false,"make_latest":"true"}' >/dev/null
 
           for attempt in $(seq 1 12); do
-            immutable=$(gh api "repos/${repo}/releases/tags/${tag}" --jq .immutable)
+            immutable=$(gh api "repos/${repo}/releases/${release_id}" --jq .immutable)
             if [ "$immutable" = true ]; then
               exit 0
             fi
