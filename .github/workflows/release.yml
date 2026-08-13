@@ -294,8 +294,6 @@ jobs:
           path: dist/
 
       - name: Verify remote release tag
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           repo="${GITHUB_REPOSITORY}"
@@ -306,15 +304,9 @@ jobs:
             remote_tag=$(git ls-remote "https://github.com/${repo}.git" \
               "refs/tags/${tag}" | cut -f 1)
           fi
-          release_id=$(gh api "repos/${repo}/releases?per_page=100" |
-            jq --raw-output --arg tag "$tag" \
-              '.[] | select(.tag_name == $tag) | .id' | head -1)
-          test -n "$release_id"
-          target=$(gh api "repos/${repo}/releases/${release_id}" \
-            --jq .target_commitish)
-          if [ "$remote_tag" != "${GITHUB_SHA}" ] || [ "$target" != "${GITHUB_SHA}" ]; then
-            printf 'release verification failed: expected=%s tag=%s target=%s\n' \
-              "${GITHUB_SHA}" "$remote_tag" "$target"
+          if [ "$remote_tag" != "${GITHUB_SHA}" ]; then
+            printf 'tag verification failed: expected=%s tag=%s\n' \
+              "${GITHUB_SHA}" "$remote_tag"
             exit 1
           fi
 
@@ -397,10 +389,19 @@ jobs:
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
           repo="${GITHUB_REPOSITORY}"
-          release_id=$(gh api "repos/${repo}/releases?per_page=100" |
-            jq --raw-output --arg tag "$tag" \
-              '.[] | select(.tag_name == $tag) | .id' | head -1)
-          test -n "$release_id"
+          release_id=""
+          for attempt in $(seq 1 12); do
+            release_id=$(gh api "repos/${repo}/releases?per_page=100" |
+              jq --raw-output --arg tag "$tag" \
+                '.[] | select(.tag_name == $tag) | .id' | head -1)
+            if [ -n "$release_id" ]; then
+              break
+            fi
+            if [ "$attempt" = 12 ]; then
+              exit 1
+            fi
+            sleep 2
+          done
           release=$(gh api "repos/${repo}/releases/${release_id}")
           draft=$(jq --raw-output .draft <<<"$release")
           target=$(jq --raw-output .target_commitish <<<"$release")
