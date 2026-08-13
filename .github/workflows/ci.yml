@@ -69,7 +69,7 @@ jobs:
           uv pip install --python "$wheel_env/bin/python" "${wheel}[gemini]"
           uv pip install --python "$sdist_env/bin/python" "${sdist}[gemini]"
           smoke_code='
-          from brrragent import KeyPool, McpServerConfig, PromptCacheConfig, run_agent
+          from brrragent import ImageInput, KeyPool, McpServerConfig, PromptCacheConfig, run_agent
           import brrragent.agent
           import brrragent.auth_cli
           import brrragent.codex_oauth
@@ -81,6 +81,8 @@ jobs:
           import brrragent.prompt_cache
 
           assert KeyPool(["smoke-key"]).acquire() == "smoke-key"
+          image = ImageInput.from_bytes(b"image", media_type="image/png")
+          assert image.url.startswith("data:image/png;base64,")
           assert PromptCacheConfig("smoke:v1").mode == "explicit"
           assert McpServerConfig(
               name="local", transport="stdio", command="true"

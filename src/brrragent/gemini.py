@@ -13,6 +13,7 @@ import time
 from collections.abc import Callable
 
 from brrragent._errors import safe_error_summary
+from brrragent.images import ImageInput, _decode_data_url
 from brrragent.keys import KeyPool
 from brrragent.prompt_cache import AgentUsage, PromptCacheConfig, gemini_usage
 
@@ -41,6 +42,7 @@ def run_gemini_agent(
     response_schema: dict | None,
     prompt_cache: PromptCacheConfig | None = None,
     on_usage: Callable[[AgentUsage], None] | None = None,
+    images: tuple[ImageInput, ...] = (),
 ) -> str:
     """Run the agent using the Google genai SDK directly (no OpenRouter).
 
@@ -63,8 +65,19 @@ def run_gemini_agent(
     client = genai.Client(api_key=selected_key)
     tools = mcp.get_genai_tools()
 
+    image_parts = []
+    for image in images:
+        decoded = _decode_data_url(image.url)
+        if decoded:
+            media_type, data = decoded
+            image_parts.append(gt.Part.from_bytes(data=data, mime_type=media_type))
+        else:
+            image_parts.append(
+                gt.Part.from_uri(file_uri=image.url, mime_type=image.media_type)
+            )
+
     contents: list[gt.Content] = [
-        gt.Content(role="user", parts=[gt.Part(text=user_prompt)])
+        gt.Content(role="user", parts=[gt.Part(text=user_prompt), *image_parts])
     ]
 
     del prompt_cache  # Gemini implicit caching uses the stable system/user prefix.

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from brrragent import PromptCacheConfig
+from brrragent import ImageInput, PromptCacheConfig
 from brrragent.openai_direct import (
     _build_chat_kwargs,
     _build_responses_kwargs,
@@ -359,6 +359,60 @@ def test_chat_agent_runs_tool_round_trip_and_reports_each_usage(monkeypatch):
             "content": '{"result":"tool evidence"}',
         },
     ]
+
+
+def test_chat_agent_sends_image_content(monkeypatch):
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=FakeChatMessage(content="mushroom"), finish_reason="stop"
+            )
+        ],
+        usage=None,
+    )
+    client = fake_client(chat_results=[response])
+    install_openai(monkeypatch, lambda **kwargs: client)
+
+    result = run_with_defaults(
+        mcp=FakeMcp(),
+        images=(ImageInput("https://example.test/image.jpg", detail="low"),),
+    )
+
+    assert result == "mushroom"
+    assert client.chat.completions.create.calls[0]["messages"][1]["content"] == [
+        {"type": "text", "text": "Find the answer"},
+        {
+            "type": "image_url",
+            "image_url": {
+                "url": "https://example.test/image.jpg",
+                "detail": "low",
+            },
+        },
+    ]
+
+
+def test_responses_agent_sends_image_content(monkeypatch):
+    response = SimpleNamespace(
+        id="resp_image",
+        output=[],
+        output_text="mushroom",
+        usage=None,
+    )
+    client = fake_client(response_results=[response])
+    install_openai(monkeypatch, lambda **kwargs: client)
+
+    result = run_with_defaults(
+        mcp=FakeMcp(),
+        model="openai/gpt-5.6-luna:medium",
+        response_schema={"type": "object", "properties": {}},
+        images=(ImageInput.from_bytes(b"png", media_type="image/png"),),
+    )
+
+    assert result == "mushroom"
+    content = client.responses.create.calls[0]["input"][0]["content"]
+    assert content[0] == {"type": "input_text", "text": "Find the answer"}
+    assert content[1]["type"] == "input_image"
+    assert content[1]["image_url"].startswith("data:image/png;base64,")
 
 
 def test_responses_agent_synthesizes_after_max_turns_and_handles_invalid_json(

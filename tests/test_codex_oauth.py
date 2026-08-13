@@ -8,7 +8,7 @@ from urllib.error import HTTPError
 
 import pytest
 
-from brrragent import PromptCacheConfig
+from brrragent import ImageInput, PromptCacheConfig
 from brrragent.codex_oauth import (
     CodexAuthConfig,
     _auth_path,
@@ -272,6 +272,82 @@ def test_codex_agent_forces_final_synthesis_after_tool_turn_limit(monkeypatch):
     assert "tools" not in payloads[1]
     assert "Stop calling tools" in str(payloads[1]["input"])
     assert "Tool result" in str(payloads[1]["input"])
+
+
+def test_codex_agent_sends_multiple_images_with_structured_output(monkeypatch):
+    payloads = []
+
+    class FakeMcp:
+        def get_openai_tools(self):
+            return []
+
+    def fake_stream(payload, _headers, timeout):
+        assert timeout > 0
+        payloads.append(payload)
+        return {"text": '{"answer":"mushroom"}', "function_calls": []}
+
+    monkeypatch.setattr(
+        "brrragent.codex_oauth._get_codex_access_token", lambda: ("access", "account")
+    )
+    monkeypatch.setattr("brrragent.codex_oauth._stream_codex_response", fake_stream)
+    schema = {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"],
+        "additionalProperties": False,
+    }
+
+    result = run_codex_oauth_agent(
+        system_prompt="Analyze images.",
+        user_prompt="What is shown?",
+        model="codex/gpt-5.6-luna:medium",
+        mcp=FakeMcp(),
+        extra_tools=None,
+        max_turns=1,
+        temperature=0.2,
+        max_tokens=1000,
+        max_retries=1,
+        on_tool_call=None,
+        response_schema=schema,
+        images=(
+            ImageInput("https://example.test/one.png", detail="low"),
+            ImageInput.from_bytes(b"jpeg", media_type="image/jpeg", detail="high"),
+        ),
+    )
+
+    assert result == '{"answer":"mushroom"}'
+    content = payloads[0]["input"][0]["content"]
+    assert content[0] == {"type": "input_text", "text": "What is shown?"}
+    assert content[1] == {
+        "type": "input_image",
+        "image_url": "https://example.test/one.png",
+        "detail": "low",
+    }
+    assert content[2]["image_url"].startswith("data:image/jpeg;base64,")
+    assert content[2]["detail"] == "high"
+    assert payloads[0]["text"]["format"]["schema"] is schema
+
+
+def test_codex_spark_rejects_image_input():
+    class FakeMcp:
+        def get_openai_tools(self):
+            return []
+
+    with pytest.raises(ValueError, match="does not support image input"):
+        run_codex_oauth_agent(
+            system_prompt="Analyze.",
+            user_prompt="Describe.",
+            model="codex/gpt-5.3-codex-spark:xhigh",
+            mcp=FakeMcp(),
+            extra_tools=None,
+            max_turns=1,
+            temperature=0.2,
+            max_tokens=1000,
+            max_retries=1,
+            on_tool_call=None,
+            response_schema=None,
+            images=(ImageInput("https://example.test/image.png"),),
+        )
 
 
 def _write_codex_cli_auth(codex_home):

@@ -1,7 +1,7 @@
 import sys
 from types import ModuleType, SimpleNamespace
 
-from brrragent import gemini
+from brrragent import ImageInput, gemini
 from brrragent.prompt_cache import AgentUsage
 
 
@@ -10,6 +10,14 @@ class FakePart:
         self.text = text
         self.function_call = function_call
         self.function_response = function_response
+
+    @classmethod
+    def from_bytes(cls, *, data, mime_type):
+        return SimpleNamespace(source="bytes", data=data, mime_type=mime_type)
+
+    @classmethod
+    def from_uri(cls, *, file_uri, mime_type=None):
+        return SimpleNamespace(source="uri", file_uri=file_uri, mime_type=mime_type)
 
 
 class FakeContent:
@@ -198,6 +206,45 @@ def test_gemini_agent_executes_tool_then_returns_schema_response(monkeypatch):
     assert config.max_output_tokens == 321
     assert config.response_mime_type == "application/json"
     assert config.response_schema is schema
+
+
+def test_gemini_agent_sends_data_and_url_images(monkeypatch):
+    response = _response(FakePart(text="mushroom"))
+    _, calls = _install_fake_google_sdk(
+        monkeypatch, lambda _key, _call_number, _kwargs: response
+    )
+
+    result = gemini.run_gemini_agent(
+        system_prompt="system",
+        user_prompt="question",
+        model="gemini-test",
+        api_key="fake-key",
+        mcp=FakeMcp(),
+        max_turns=1,
+        temperature=0.2,
+        max_tokens=321,
+        max_retries=1,
+        on_tool_call=None,
+        response_schema=None,
+        images=(
+            ImageInput.from_bytes(b"png", media_type="image/png"),
+            ImageInput("https://example.test/image.jpg", media_type="image/jpeg"),
+        ),
+    )
+
+    assert result == "mushroom"
+    parts = calls[0]["contents"][0].parts
+    assert parts[0].text == "question"
+    assert (parts[1].source, parts[1].data, parts[1].mime_type) == (
+        "bytes",
+        b"png",
+        "image/png",
+    )
+    assert (parts[2].source, parts[2].file_uri, parts[2].mime_type) == (
+        "uri",
+        "https://example.test/image.jpg",
+        "image/jpeg",
+    )
 
 
 def test_gemini_agent_rotates_key_and_retries_429_without_sleep(monkeypatch):

@@ -51,6 +51,28 @@ with McpToolCaller(endpoint="https://mcp.example.com/mcp") as mcp:
 print(result)
 ```
 
+## Image inputs
+
+`run_agent` accepts one or more images with Codex OAuth, OpenAI, OpenRouter,
+OpenAI-compatible providers, and Gemini:
+
+```python
+from brrragent import ImageInput, run_agent
+
+result = run_agent(
+    system_prompt="Return a concise image description.",
+    user_prompt="What is shown?",
+    model="codex/gpt-5.6-luna:medium",
+    images=[ImageInput.from_file("photo.jpg", detail="low")],
+)
+```
+
+Use `ImageInput(url)` for remote images, `ImageInput.from_base64(...)` for
+existing Base64 data, or `ImageInput.from_bytes(...)` for in-memory content.
+Multiple images preserve their input order. Detail can be `auto`, `low`,
+`high`, or `original`; provider and model support still applies. Codex Spark
+does not accept image input.
+
 Provider credentials are read from the caller's environment. Common variables
 are `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, and `GEMINI_API_KEY`.
 

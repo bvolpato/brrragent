@@ -11,6 +11,7 @@ import time
 from collections.abc import Callable
 
 from brrragent._errors import safe_error_summary
+from brrragent.images import ImageInput, _chat_user_content
 from brrragent.keys import KeyPool
 from brrragent.prompt_cache import AgentUsage, PromptCacheConfig, openai_usage
 
@@ -61,6 +62,7 @@ def run_openrouter_agent(
     reasoning_effort: str | None = None,
     prompt_cache: PromptCacheConfig | None = None,
     on_usage: Callable[[AgentUsage], None] | None = None,
+    images: tuple[ImageInput, ...] = (),
 ) -> str:
     """Run the agent using an OpenAI-compatible API (OpenRouter, OpenAI, etc.).
 
@@ -92,7 +94,7 @@ def run_openrouter_agent(
             "role": "system",
             "content": _system_content(system_prompt, model, prompt_cache),
         },
-        {"role": "user", "content": user_prompt},
+        {"role": "user", "content": _chat_user_content(user_prompt, images)},
     ]
 
     response_format = None

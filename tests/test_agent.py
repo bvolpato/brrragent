@@ -2,6 +2,7 @@ import pytest
 
 from brrragent import agent
 from brrragent.codex_oauth import CodexAuthConfig
+from brrragent.images import ImageInput
 from brrragent.keys import KeyPool
 
 
@@ -210,6 +211,40 @@ def test_run_agent_routes_codex_prefix_without_env(monkeypatch):
     )
 
     assert calls[0]["model"] == "codex/gpt-5.4:xhigh"
+
+
+def test_run_agent_passes_normalized_images_to_provider(monkeypatch):
+    calls = []
+    image = ImageInput.from_bytes(b"image", media_type="image/png", detail="low")
+
+    def fake_codex_agent(**kwargs):
+        calls.append(kwargs)
+        return "ok"
+
+    monkeypatch.setattr("brrragent.codex_oauth.run_codex_oauth_agent", fake_codex_agent)
+
+    assert (
+        agent.run_agent(
+            system_prompt="system",
+            user_prompt="user",
+            model="codex/gpt-5.6-luna:medium",
+            mcp=DummyMcp(),
+            images=[image],
+        )
+        == "ok"
+    )
+    assert calls[0]["images"] == (image,)
+
+
+def test_run_agent_rejects_untyped_image_values():
+    with pytest.raises(TypeError, match="ImageInput"):
+        agent.run_agent(
+            system_prompt="system",
+            user_prompt="user",
+            model="codex/gpt-5.6-luna:medium",
+            mcp=DummyMcp(),
+            images=["data:image/png;base64,aW1hZ2U="],
+        )
 
 
 def test_run_agent_applies_per_call_codex_auth(monkeypatch, tmp_path):
