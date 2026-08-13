@@ -21,17 +21,19 @@ result truncation, and provider routing are handled by the package.
 
 ## Installation
 
-From a checkout:
+Install from PyPI:
 
 ```bash
-uv pip install /path/to/brrragent
+uv add brrragent
 ```
 
 Gemini support uses an optional dependency:
 
 ```bash
-uv pip install "/path/to/brrragent[gemini]"
+uv add "brrragent[gemini]"
 ```
+
+Use `uv pip install` instead when installing into an existing environment.
 
 ## Basic use
 
