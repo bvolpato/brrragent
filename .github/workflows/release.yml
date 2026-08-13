@@ -416,11 +416,28 @@ jobs:
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
           repo="${GITHUB_REPOSITORY}"
-          release_id=$(gh api "repos/${repo}/releases?per_page=100" |
-            jq --raw-output --arg tag "$tag" \
-              '.[] | select(.tag_name == $tag) | .id' | head -1)
-          test -n "$release_id"
-          release=$(gh api "repos/${repo}/releases/${release_id}")
+          release_id=""
+          for attempt in $(seq 1 12); do
+            release_id=$(gh api "repos/${repo}/releases?per_page=100" |
+              jq --raw-output --arg tag "$tag" \
+                '.[] | select(.tag_name == $tag) | .id' | head -1)
+            if [ -n "$release_id" ]; then
+              break
+            fi
+            if [ "$attempt" = 12 ]; then
+              exit 1
+            fi
+            sleep 2
+          done
+          for attempt in $(seq 1 12); do
+            if release=$(gh api "repos/${repo}/releases/${release_id}"); then
+              break
+            fi
+            if [ "$attempt" = 12 ]; then
+              exit 1
+            fi
+            sleep 2
+          done
           draft=$(jq --raw-output .draft <<<"$release")
           target=$(jq --raw-output .target_commitish <<<"$release")
           remote_tag=$(git ls-remote "https://github.com/${repo}.git" \
