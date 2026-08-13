@@ -224,17 +224,11 @@ def run_openai_agent(
     on_usage: Callable[[AgentUsage], None] | None = None,
 ) -> str:
     """Run the agent using OpenAI's native API."""
-    from openai import OpenAI
-
     if key_pool is None and api_key is None:
         raise ValueError("Either api_key or key_pool must be provided")
 
     selected_key = api_key or key_pool.acquire()
-    client = OpenAI(
-        api_key=selected_key,
-        timeout=120.0,
-        default_headers={"X-Title": "brrragent"},
-    )
+    client = _new_openai_client(selected_key)
 
     tools = mcp.get_openai_tools()
     if extra_tools:
@@ -300,11 +294,7 @@ def run_openai_agent(
             response, new_key = result
             if new_key != selected_key:
                 selected_key = new_key
-                client = OpenAI(
-                    api_key=selected_key,
-                    timeout=120.0,
-                    default_headers={"X-Title": "brrragent"},
-                )
+                client = _new_openai_client(selected_key)
         else:
             response = result
 
@@ -377,8 +367,6 @@ def _run_openai_responses_agent(
     prompt_cache: PromptCacheConfig | None,
     on_usage: Callable[[AgentUsage], None] | None,
 ) -> str:
-    from openai import OpenAI
-
     previous_response_id = None
     input_items = [{"role": "user", "content": user_prompt}]
 
@@ -411,11 +399,7 @@ def _run_openai_responses_agent(
             response, new_key = result
             if new_key != selected_key:
                 selected_key = new_key
-                client = OpenAI(
-                    api_key=selected_key,
-                    timeout=120.0,
-                    default_headers={"X-Title": "brrragent"},
-                )
+                client = _new_openai_client(selected_key)
         else:
             response = result
 
@@ -504,8 +488,6 @@ def _call_with_retry(
     current_key: str = "",
     prompt_cache: PromptCacheConfig | None = None,
 ):
-    from openai import OpenAI
-
     last_err = None
 
     for attempt in range(1, max_retries + 1):
@@ -536,11 +518,7 @@ def _call_with_retry(
                 )
                 key_pool.report_rate_limit(current_key)
                 current_key = key_pool.acquire()
-                client = OpenAI(
-                    api_key=current_key,
-                    timeout=120.0,
-                    default_headers={"X-Title": "brrragent"},
-                )
+                client = _new_openai_client(current_key)
                 logger.info("[agent] Rotated to OpenAI key ...%s", current_key[-6:])
                 continue
 
@@ -577,8 +555,6 @@ def _call_responses_with_retry(
     current_key: str = "",
     prompt_cache: PromptCacheConfig | None = None,
 ):
-    from openai import OpenAI
-
     last_err = None
 
     for attempt in range(1, max_retries + 1):
@@ -611,11 +587,7 @@ def _call_responses_with_retry(
                 )
                 key_pool.report_rate_limit(current_key)
                 current_key = key_pool.acquire()
-                client = OpenAI(
-                    api_key=current_key,
-                    timeout=120.0,
-                    default_headers={"X-Title": "brrragent"},
-                )
+                client = _new_openai_client(current_key)
                 logger.info("[agent] Rotated to OpenAI key ...%s", current_key[-6:])
                 continue
 
@@ -635,4 +607,15 @@ def _call_responses_with_retry(
 
     raise ValueError(
         f"OpenAI Responses call failed after {max_retries} retries: {last_err}"
+    )
+
+
+def _new_openai_client(api_key: str):
+    from openai import OpenAI
+
+    return OpenAI(
+        api_key=api_key,
+        timeout=120.0,
+        max_retries=0,
+        default_headers={"X-Title": "brrragent"},
     )
