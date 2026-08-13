@@ -332,7 +332,7 @@ jobs:
               "refs/tags/${tag}" | cut -f 1)
           fi
           if [ "$remote_tag" != "${GITHUB_SHA}" ]; then
-            printf 'tag verification failed: expected=%s tag=%s\n' \
+            printf 'release verification failed: expected=%s tag=%s\n' \
               "${GITHUB_SHA}" "$remote_tag"
             exit 1
           fi
