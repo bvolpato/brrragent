@@ -111,6 +111,7 @@ jobs:
         run: |
           set -euo pipefail
           expected=$(printf '%s\n' \
+            'Analyze (actions)' 'Analyze (python)' \
             gitleaks minimum-openai quality \
             'test (3.12)' 'test (3.13)' 'test (3.14)' | sort)
 
@@ -118,7 +119,7 @@ jobs:
             checks=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/check-runs" \
               --paginate --jq '.check_runs[] | [.name, .status, (.conclusion // "")] | @tsv')
             checks=$(printf '%s\n' "$checks" | awk -F '\t' \
-              '$1 ~ /^(gitleaks|minimum-openai|quality|test \(3\.12\)|test \(3\.13\)|test \(3\.14\))$/')
+              '$1 ~ /^(Analyze \(actions\)|Analyze \(python\)|gitleaks|minimum-openai|quality|test \(3\.12\)|test \(3\.13\)|test \(3\.14\))$/')
             names=$(printf '%s\n' "$checks" | cut -f 1 | sort -u)
 
             if [ "$names" = "$expected" ] && \
