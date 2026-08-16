@@ -344,57 +344,95 @@ jobs:
         run: |
           set -euo pipefail
           metadata=$(mktemp)
+          mkdir publish-dist
           status=$(curl --silent --show-error --output "$metadata" --write-out '%{http_code}' \
             "https://pypi.org/pypi/brrragent/${GITHUB_REF_NAME#v}/json")
 
           if [ "$status" = 404 ]; then
-            echo "present=false" >>"${GITHUB_OUTPUT}"
+            cp dist/* publish-dist/
+            echo "publish=true" >>"${GITHUB_OUTPUT}"
             exit 0
           fi
           test "$status" = 200
 
+          expected_files=$(mktemp)
+          remote_files=$(mktemp)
+          find dist -maxdepth 1 -type f -printf '%f\n' | sort >"$expected_files"
+          jq --raw-output '.urls[].filename' "$metadata" | sort >"$remote_files"
+          unexpected=$(comm -13 "$expected_files" "$remote_files")
+          if [ -n "$unexpected" ]; then
+            printf 'Unexpected PyPI release files:\n%s\n' "$unexpected"
+            exit 1
+          fi
+
+          publish=false
           for artifact in dist/*; do
             filename=$(basename "$artifact")
             expected=$(sha256sum "$artifact" | cut -d ' ' -f 1)
             actual=$(jq --raw-output --arg filename "$filename" \
               '.urls[] | select(.filename == $filename) | .digests.sha256' \
               "$metadata")
-            test -n "$actual"
-            test "$actual" = "$expected"
+            if [ -z "$actual" ]; then
+              cp "$artifact" publish-dist/
+              publish=true
+            elif [ "$actual" != "$expected" ]; then
+              printf 'PyPI digest mismatch for %s: expected=%s actual=%s\n' \
+                "$filename" "$expected" "$actual"
+              exit 1
+            fi
           done
-          echo "present=true" >>"${GITHUB_OUTPUT}"
+          echo "publish=${publish}" >>"${GITHUB_OUTPUT}"
 
       - name: Publish to PyPI
-        if: steps.existing.outputs.present != 'true'
+        if: steps.existing.outputs.publish == 'true'
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           attestations: true
-          packages-dir: dist/
+          packages-dir: publish-dist/
 
       - name: Verify published digests
         run: |
           set -euo pipefail
           metadata=$(mktemp)
+          expected_files=$(mktemp)
+          remote_files=$(mktemp)
+          find dist -maxdepth 1 -type f -printf '%f\n' | sort >"$expected_files"
           for attempt in $(seq 1 60); do
             if curl --fail --silent --show-error \
               "https://pypi.org/pypi/brrragent/${GITHUB_REF_NAME#v}/json" \
               >"$metadata"; then
-              break
+              jq --raw-output '.urls[].filename' "$metadata" | sort >"$remote_files"
+              unexpected=$(comm -13 "$expected_files" "$remote_files")
+              if [ -n "$unexpected" ]; then
+                printf 'Unexpected PyPI release files:\n%s\n' "$unexpected"
+                exit 1
+              fi
+              complete=true
+              for artifact in dist/*; do
+                filename=$(basename "$artifact")
+                expected=$(sha256sum "$artifact" | cut -d ' ' -f 1)
+                actual=$(jq --raw-output --arg filename "$filename" \
+                  '.urls[] | select(.filename == $filename) | .digests.sha256' \
+                  "$metadata")
+                if [ -z "$actual" ]; then
+                  complete=false
+                  break
+                fi
+                if [ "$actual" != "$expected" ]; then
+                  printf 'PyPI digest mismatch for %s: expected=%s actual=%s\n' \
+                    "$filename" "$expected" "$actual"
+                  exit 1
+                fi
+              done
+              if [ "$complete" = true ]; then
+                exit 0
+              fi
             fi
             if [ "$attempt" = 60 ]; then
+              printf 'PyPI metadata did not expose every release artifact\n'
               exit 1
             fi
             sleep 5
-          done
-
-          for artifact in dist/*; do
-            filename=$(basename "$artifact")
-            expected=$(sha256sum "$artifact" | cut -d ' ' -f 1)
-            actual=$(jq --raw-output --arg filename "$filename" \
-              '.urls[] | select(.filename == $filename) | .digests.sha256' \
-              "$metadata")
-            test -n "$actual"
-            test "$actual" = "$expected"
           done
 
   github-release:
