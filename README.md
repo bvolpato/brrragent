@@ -220,7 +220,7 @@ from brrragent import (
 - `httpx>=0.27.1,<1`
 - `httpx2>=2.5,<3`
 - `mcp>=2.0.0,<3`
-- `openai>=2.45.0,<3`
+- `openai>=2.45.0,<4`
 - `google-genai>=1.0.0,<3` for the `gemini` extra
 
 ## License
