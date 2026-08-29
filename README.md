@@ -74,7 +74,12 @@ Multiple images preserve their input order. Detail can be `auto`, `low`,
 does not accept image input.
 
 Provider credentials are read from the caller's environment. Common variables
-are `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, and `GEMINI_API_KEY`.
+are `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `OPENLUX_API_KEY`, and
+`GEMINI_API_KEY`.
+
+Use `openlux/<model>` for OpenLux-native routing. Legacy `yunwu/<model>`
+aliases remain accepted; `YUNWU_API_KEY` is used only when
+`OPENLUX_API_KEY` is unset.
 
 ## Codex OAuth
 

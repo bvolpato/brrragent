@@ -129,7 +129,7 @@ def test_openrouter_call_uses_reasoning_kwargs_when_requested():
         response_format=None,
         key_pool=None,
         current_key="",
-        base_url="https://yunwu.ai/v1",
+        base_url="https://api.openlux.ai/v1",
         reasoning_effort="high",
     )
 

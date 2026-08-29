@@ -9,7 +9,8 @@ Routing logic:
   - model starts with "google/" or "gemini-" + Gemini keys available → Gemini direct
   - model starts with "fireworks/" + FIREWORKS_API_KEY → Fireworks native
   - model starts with "minimax/" + MINIMAX_API_KEY → MiniMax native
-  - model starts with "yunwu/" + YUNWU_API_KEY → Yunwu native
+  - model starts with "openlux/" + OPENLUX_API_KEY → OpenLux native
+  - legacy "yunwu/" models use the same OpenLux native route
   - model starts with "codex/" → Codex OAuth
   - model starts with "openai/" + BRRRAGENT_OPENAI_BACKEND=codex_oauth → Codex OAuth
   - model starts with "openai/" + OpenAI keys available → OpenAI direct
@@ -59,7 +60,8 @@ MAX_TOOL_TURNS = 12
 NATIVE_PROVIDERS: dict[str, tuple[str, str]] = {
     "fireworks/": ("https://api.fireworks.ai/inference/v1", "FIREWORKS_API_KEY"),
     "minimax/": ("https://api.minimax.io/v1", "MINIMAX_API_KEY"),
-    "yunwu/": ("https://yunwu.ai/v1", "YUNWU_API_KEY"),
+    "openlux/": ("https://api.openlux.ai/v1", "OPENLUX_API_KEY"),
+    "yunwu/": ("https://api.openlux.ai/v1", "OPENLUX_API_KEY"),
     "z-ai/": (
         os.environ.get("ZAI_BASE_URL", "https://api.z.ai/api/coding/paas/v4"),
         "ZAI_API_KEY",
@@ -100,6 +102,15 @@ def _get_gemini_model_name(model: str) -> str:
     return model
 
 
+def _native_provider_api_key(env_var: str) -> str:
+    api_key = os.environ.get(env_var, "").strip()
+    if api_key:
+        return api_key
+    if env_var == "OPENLUX_API_KEY":
+        return os.environ.get("YUNWU_API_KEY", "").strip()
+    return ""
+
+
 def _resolve_native_provider(model: str) -> tuple[str, str, str, str] | None:
     """Check if the model matches a native provider prefix.
 
@@ -108,13 +119,18 @@ def _resolve_native_provider(model: str) -> tuple[str, str, str, str] | None:
 
     The bare_model has the provider prefix stripped — native APIs expect the
     model ID without it (e.g. "accounts/fireworks/routers/kimi-k2p5-turbo"
-    not "fireworks/accounts/fireworks/routers/kimi-k2p5-turbo").
+    not "fireworks/accounts/fireworks/routers/kimi-k2p5-turbo"). Legacy Yunwu
+    routes are reported as OpenLux after alias resolution.
     """
     for prefix, (base_url, env_var) in NATIVE_PROVIDERS.items():
         if model.startswith(prefix):
-            api_key = os.environ.get(env_var, "").strip()
+            api_key = _native_provider_api_key(env_var)
             if api_key:
-                provider_name = prefix.rstrip("/")
+                provider_name = (
+                    "openlux"
+                    if prefix in {"openlux/", "yunwu/"}
+                    else prefix.rstrip("/")
+                )
                 bare_model = model[len(prefix) :]
                 return base_url, api_key, provider_name, bare_model
             logger.debug(
@@ -170,7 +186,8 @@ def run_agent(
       - If model starts with "codex/" → Codex OAuth
       - If model starts with "openai/" and BRRRAGENT_OPENAI_BACKEND=codex_oauth → Codex OAuth
       - If model starts with "openai/" and OpenAI keys are available → OpenAI direct
-      - If model starts with a native provider prefix (fireworks/, minimax/, yunwu/) and
+      - If model starts with a native provider prefix (fireworks/, minimax/, openlux/)
+        and
         the corresponding env var is set → provider's native API
       - Otherwise → OpenRouter with OPENROUTER_API_KEY
 
@@ -332,7 +349,7 @@ def run_agent(
 
         native_base_url, native_api_key, provider_name, bare_model = native
         reasoning_effort = None
-        if provider_name in {"yunwu", "z-ai"}:
+        if provider_name in {"openlux", "z-ai"}:
             bare_model, reasoning_effort = parse_openai_model(bare_model)
         if provider_name == "z-ai" and not reasoning_effort:
             reasoning_effort = (

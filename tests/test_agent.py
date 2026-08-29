@@ -41,13 +41,26 @@ def test_resolve_native_provider_uses_env_key_and_strips_prefix(monkeypatch):
     )
 
 
-def test_resolve_native_provider_supports_yunwu(monkeypatch):
-    monkeypatch.setenv("YUNWU_API_KEY", "yunwu-key")
+def test_resolve_native_provider_supports_openlux(monkeypatch):
+    monkeypatch.setenv("OPENLUX_API_KEY", "openlux-key")
+    monkeypatch.setenv("YUNWU_API_KEY", "legacy-key")
+
+    assert agent._resolve_native_provider("openlux/gpt-5.4:high") == (
+        "https://api.openlux.ai/v1",
+        "openlux-key",
+        "openlux",
+        "gpt-5.4:high",
+    )
+
+
+def test_resolve_native_provider_supports_legacy_yunwu_alias(monkeypatch):
+    monkeypatch.delenv("OPENLUX_API_KEY", raising=False)
+    monkeypatch.setenv("YUNWU_API_KEY", "legacy-key")
 
     assert agent._resolve_native_provider("yunwu/gpt-5.4:high") == (
-        "https://yunwu.ai/v1",
-        "yunwu-key",
-        "yunwu",
+        "https://api.openlux.ai/v1",
+        "legacy-key",
+        "openlux",
         "gpt-5.4:high",
     )
 
@@ -85,14 +98,25 @@ def test_run_agent_routes_native_provider(monkeypatch):
     assert calls[0]["base_url"] == "https://api.minimax.io/v1"
 
 
-def test_run_agent_routes_yunwu_native_provider(monkeypatch):
+@pytest.mark.parametrize(
+    ("model", "env_var", "api_key"),
+    [
+        ("openlux/gpt-5.4:high", "OPENLUX_API_KEY", "openlux-key"),
+        ("yunwu/gpt-5.4:high", "YUNWU_API_KEY", "legacy-key"),
+    ],
+)
+def test_run_agent_routes_openlux_native_provider_aliases(
+    monkeypatch, model, env_var, api_key
+):
     calls = []
 
     def fake_openrouter_agent(**kwargs):
         calls.append(kwargs)
         return "ok"
 
-    monkeypatch.setenv("YUNWU_API_KEY", "yunwu-key")
+    monkeypatch.delenv("OPENLUX_API_KEY", raising=False)
+    monkeypatch.delenv("YUNWU_API_KEY", raising=False)
+    monkeypatch.setenv(env_var, api_key)
     monkeypatch.setattr(
         "brrragent.openrouter.run_openrouter_agent", fake_openrouter_agent
     )
@@ -101,15 +125,15 @@ def test_run_agent_routes_yunwu_native_provider(monkeypatch):
         agent.run_agent(
             system_prompt="system",
             user_prompt="user",
-            model="yunwu/gpt-5.4:high",
+            model=model,
             mcp=DummyMcp(),
         )
         == "ok"
     )
 
     assert calls[0]["model"] == "gpt-5.4"
-    assert calls[0]["api_key"] == "yunwu-key"
-    assert calls[0]["base_url"] == "https://yunwu.ai/v1"
+    assert calls[0]["api_key"] == api_key
+    assert calls[0]["base_url"] == "https://api.openlux.ai/v1"
     assert calls[0]["reasoning_effort"] == "high"
 
 
