@@ -418,7 +418,9 @@ def test_responses_agent_sends_image_content(monkeypatch):
 def test_responses_agent_synthesizes_after_max_turns_and_handles_invalid_json(
     monkeypatch,
 ):
-    function_call = SimpleNamespace(
+    from openai.types.responses import ResponseFunctionToolCall
+
+    function_call = ResponseFunctionToolCall(
         type="function_call",
         name="lookup",
         arguments="{not-json",
@@ -474,9 +476,13 @@ def test_responses_agent_synthesizes_after_max_turns_and_handles_invalid_json(
     assert calls[0]["instructions"] == "Use tools when useful"
     assert calls[0]["store"] is False
     assert calls[0]["tools"][0]["name"] == "lookup"
-    assert calls[1]["previous_response_id"] == "resp_tool"
+    assert "previous_response_id" not in calls[1]
+    assert calls[1]["instructions"] == "Use tools when useful"
+    assert calls[1]["store"] is False
     assert calls[1].get("tools", []) == []
     assert calls[1]["input"] == [
+        *calls[0]["input"],
+        function_call.model_dump(exclude_none=True),
         {
             "type": "function_call_output",
             "call_id": "call_bad_json",

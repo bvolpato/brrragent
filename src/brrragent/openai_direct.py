@@ -89,7 +89,6 @@ def _build_responses_kwargs(
     temperature: float,
     max_tokens: int,
     response_schema: dict | None,
-    previous_response_id: str | None = None,
     prompt_cache: PromptCacheConfig | None = None,
 ) -> dict:
     bare_model, reasoning_effort = parse_openai_model(model)
@@ -98,7 +97,6 @@ def _build_responses_kwargs(
         and prompt_cache.mode == "explicit"
         and bare_model.startswith("gpt-5.6")
         and instructions
-        and previous_response_id is None
     )
     if explicit_cache:
         input_items = [
@@ -120,12 +118,11 @@ def _build_responses_kwargs(
         "input": input_items,
         "max_output_tokens": max_tokens,
         "store": False,
+        "include": ["reasoning.encrypted_content"],
         "extra_headers": {"X-Title": "brrragent"},
     }
-    if instructions and previous_response_id is None:
+    if instructions:
         kwargs["instructions"] = instructions
-    if previous_response_id:
-        kwargs["previous_response_id"] = previous_response_id
     if tools:
         kwargs["tools"] = [_to_responses_tool(tool) for tool in tools]
     if response_schema:
@@ -274,17 +271,33 @@ def run_openai_agent(
             images=images,
         )
 
-    for turn in range(max_turns):
-        bare_model, _ = parse_openai_model(model)
-        logger.info(
-            "[agent] Turn %d/%d - calling OpenAI %s", turn + 1, max_turns, bare_model
-        )
+    for turn in range(max_turns + 1):
+        final_turn = turn == max_turns
+        if final_turn:
+            logger.warning(
+                "[agent] Reached max_turns=%d; requesting final answer without tools",
+                max_turns,
+            )
+            messages.append(
+                {
+                    "role": "user",
+                    "content": "Stop calling tools. Provide the final answer using the evidence already gathered.",
+                }
+            )
+        else:
+            bare_model, _ = parse_openai_model(model)
+            logger.info(
+                "[agent] Turn %d/%d - calling OpenAI %s",
+                turn + 1,
+                max_turns,
+                bare_model,
+            )
 
         result = _call_with_retry(
             client=client,
             model=model,
             messages=messages,
-            tools=tools,
+            tools=[] if final_turn else tools,
             temperature=temperature,
             max_tokens=max_tokens,
             max_retries=max_retries,
@@ -307,6 +320,8 @@ def run_openai_agent(
 
         choice = response.choices[0]
         message = choice.message
+        if final_turn:
+            return message.content or "[No final response after max tool turns]"
         messages.append(message.model_dump(exclude_none=True))
 
         if message.tool_calls:
@@ -345,11 +360,7 @@ def run_openai_agent(
         if choice.finish_reason == "stop":
             return message.content or ""
 
-    logger.warning("[agent] Reached max_turns=%d without final response", max_turns)
-    last = messages[-1]
-    if isinstance(last, dict):
-        return last.get("content", "[No final response after max tool turns]")
-    return getattr(last, "content", "[No final response after max tool turns]") or ""
+    return "[No final response after max tool turns]"
 
 
 def _run_openai_responses_agent(
@@ -372,7 +383,6 @@ def _run_openai_responses_agent(
     on_usage: Callable[[AgentUsage], None] | None,
     images: tuple[ImageInput, ...],
 ) -> str:
-    previous_response_id = None
     input_items = [
         {"role": "user", "content": _responses_user_content(user_prompt, images)}
     ]
@@ -396,7 +406,6 @@ def _run_openai_responses_agent(
             max_tokens=max_tokens,
             max_retries=max_retries,
             response_schema=response_schema,
-            previous_response_id=previous_response_id,
             key_pool=key_pool,
             current_key=selected_key,
             prompt_cache=prompt_cache,
@@ -413,7 +422,6 @@ def _run_openai_responses_agent(
         if on_usage and getattr(response, "usage", None):
             on_usage(openai_usage(response.usage))
 
-        previous_response_id = response.id
         function_calls = _response_function_calls(response)
         if not function_calls:
             final_text = _response_final_text(response)
@@ -425,7 +433,10 @@ def _run_openai_responses_agent(
             return final_text
 
         logger.info("[agent] Turn %d: %d tool call(s)", turn + 1, len(function_calls))
-        input_items = []
+        # Stateless continuation needs every output item, including reasoning and phase.
+        input_items.extend(
+            item.model_dump(exclude_none=True) for item in response.output
+        )
         for tool_call in function_calls:
             fn_name = tool_call.name
             try:
@@ -466,7 +477,6 @@ def _run_openai_responses_agent(
         max_tokens=max_tokens,
         max_retries=max_retries,
         response_schema=response_schema,
-        previous_response_id=previous_response_id,
         key_pool=key_pool,
         current_key=selected_key,
         prompt_cache=prompt_cache,
@@ -558,7 +568,6 @@ def _call_responses_with_retry(
     max_tokens: int,
     max_retries: int,
     response_schema: dict | None = None,
-    previous_response_id: str | None = None,
     key_pool: KeyPool | None = None,
     current_key: str = "",
     prompt_cache: PromptCacheConfig | None = None,
@@ -575,7 +584,6 @@ def _call_responses_with_retry(
                 temperature=temperature,
                 max_tokens=max_tokens,
                 response_schema=response_schema,
-                previous_response_id=previous_response_id,
                 prompt_cache=prompt_cache,
             )
             resp = client.responses.create(**kwargs)

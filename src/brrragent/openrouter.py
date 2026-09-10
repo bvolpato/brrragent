@@ -108,16 +108,33 @@ def run_openrouter_agent(
             },
         }
 
-    for turn in range(max_turns):
-        logger.info(
-            "[agent] Turn %d/%d — calling %s (%s)", turn + 1, max_turns, model, base_url
-        )
+    for turn in range(max_turns + 1):
+        final_turn = turn == max_turns
+        if final_turn:
+            logger.warning(
+                "[agent] Reached max_turns=%d; requesting final answer without tools",
+                max_turns,
+            )
+            messages.append(
+                {
+                    "role": "user",
+                    "content": "Stop calling tools. Provide the final answer using the evidence already gathered.",
+                }
+            )
+        else:
+            logger.info(
+                "[agent] Turn %d/%d — calling %s (%s)",
+                turn + 1,
+                max_turns,
+                model,
+                base_url,
+            )
 
         result = _call_with_retry(
             client=client,
             model=model,
             messages=messages,
-            tools=tools,
+            tools=[] if final_turn else tools,
             temperature=temperature,
             max_tokens=max_tokens,
             max_retries=max_retries,
@@ -149,6 +166,8 @@ def run_openrouter_agent(
 
         choice = response.choices[0]
         message = choice.message
+        if final_turn:
+            return message.content or "[No final response after max tool turns]"
         messages.append(message.model_dump())
 
         if message.tool_calls:
@@ -187,11 +206,7 @@ def run_openrouter_agent(
         if choice.finish_reason == "stop":
             return message.content or ""
 
-    logger.warning("[agent] Reached max_turns=%d without final response", max_turns)
-    last = messages[-1]
-    if isinstance(last, dict):
-        return last.get("content", "[No final response after max tool turns]")
-    return getattr(last, "content", "[No final response after max tool turns]") or ""
+    return "[No final response after max tool turns]"
 
 
 def _call_with_retry(
