@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import socket
 import subprocess
 import sys
@@ -216,10 +217,50 @@ def test_call_tool_returns_error_string_for_url_errors():
         [urllib.error.URLError("offline")],
     )
 
-    assert (
-        caller.call_tool("web_search", {"q": "test"})
-        == "[Tool error: <urlopen error offline>]"
+    assert caller.call_tool("web_search", {"q": "test"}) == "[Tool error: URLError]"
+
+
+@pytest.mark.parametrize("during_discovery", [False, True])
+def test_tool_transport_errors_hide_details_in_results_and_logs(
+    caplog, during_discovery
+):
+    caplog.set_level(logging.DEBUG, logger="brrragent.mcp_tools")
+    url = "https://mcp.example.test/?token=private-token"
+    request = httpx2.Request("POST", url)
+    error = httpx2.HTTPStatusError(
+        f"server echoed secret-body from {url}",
+        request=request,
+        response=httpx2.Response(401, request=request),
     )
+    responses = (
+        [] if during_discovery else [{"result": {"tools": [{"name": "lookup"}]}}]
+    )
+    with FakeMcpToolCaller([*responses, error]) as caller:
+        result = caller.call_tool("lookup", {})
+
+    assert result.startswith("[Tool error: HTTPStatusError")
+    assert "HTTPStatusError" in caplog.text
+    for value in ("private-token", "secret-body", url):
+        assert value not in result
+        assert value not in caplog.text
+
+
+def test_failed_connection_hides_transport_details(caplog, monkeypatch):
+    caplog.set_level(logging.DEBUG, logger="brrragent.mcp_tools")
+
+    async def fail_connection(self, server, transport):
+        raise RuntimeError("private-token at https://mcp.example.test/private")
+
+    monkeypatch.setattr(McpToolCaller, "_open_connection", fail_connection)
+    with McpToolCaller(endpoint="https://mcp.example.test") as caller:
+        with pytest.raises(ConnectionError) as caught:
+            caller.get_filtered_schemas()
+
+    assert "streamable_http: RuntimeError" in str(caught.value)
+    assert "sse: RuntimeError" in str(caught.value)
+    assert "private-token" not in str(caught.value)
+    assert "private-token" not in caplog.text
+    assert "https://mcp.example.test/private" not in caplog.text
 
 
 def test_excluded_tool_cannot_be_called_directly():
@@ -577,10 +618,12 @@ def test_concurrent_close_does_not_leave_a_caller_blocked():
     assert all(not thread.is_alive() for thread in close_threads)
 
 
-def test_transport_cancellation_resolves_request_and_keeps_worker_alive():
+def test_transport_cancellation_resolves_request_and_keeps_worker_alive(caplog):
+    caplog.set_level(logging.DEBUG, logger="brrragent.mcp_tools")
+
     class CancelledCaller(FakeMcpToolCaller):
         async def _call(self, connections, *arguments):
-            raise asyncio.CancelledError("transport failed")
+            raise asyncio.CancelledError("transport failed: private-token")
 
     caller = CancelledCaller([])
     call_future = Future()
@@ -593,3 +636,4 @@ def test_transport_cancellation_resolves_request_and_keeps_worker_alive():
     with pytest.raises(ConnectionError, match="cancelled by its transport"):
         call_future.result()
     assert close_future.result() is None
+    assert "private-token" not in caplog.text

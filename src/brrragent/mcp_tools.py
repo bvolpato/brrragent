@@ -25,6 +25,8 @@ from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import PaginatedRequestParams
 
+from brrragent._errors import safe_error_summary
+
 logger = logging.getLogger(__name__)
 
 McpTransport = Literal[
@@ -217,7 +219,10 @@ class McpToolCaller:
                     command.future.set_exception(
                         ConnectionError("MCP operation was cancelled by its transport")
                     )
-                    logger.debug("MCP transport cancelled an operation", exc_info=exc)
+                    logger.debug(
+                        "MCP transport cancelled an operation: %s",
+                        safe_error_summary(exc),
+                    )
                 except Exception as exc:  # noqa: BLE001 - propagate through Future
                     command.future.set_exception(exc)
                 else:
@@ -227,8 +232,10 @@ class McpToolCaller:
                 if connection.stack is not None:
                     try:
                         await connection.stack.aclose()
-                    except BaseException:
-                        logger.debug("MCP session close failed", exc_info=True)
+                    except BaseException as exc:
+                        logger.debug(
+                            "MCP session close failed: %s", safe_error_summary(exc)
+                        )
 
     async def _discover(
         self,
@@ -286,8 +293,10 @@ class McpToolCaller:
             if connection.stack is not None:
                 try:
                     await connection.stack.aclose()
-                except BaseException:
-                    logger.debug("MCP failed session cleanup failed", exc_info=True)
+                except BaseException as exc:
+                    logger.debug(
+                        "MCP failed session cleanup failed: %s", safe_error_summary(exc)
+                    )
             raise
 
     async def _ensure_connection(
@@ -308,12 +317,13 @@ class McpToolCaller:
             try:
                 connection = await self._open_connection(server, transport)
             except BaseException as exc:
-                errors.append(f"{transport}: {exc}")
+                summary = safe_error_summary(exc)
+                errors.append(f"{transport}: {summary}")
                 logger.debug(
-                    "MCP %s transport %s failed",
+                    "MCP %s transport %s failed: %s",
                     server.name,
                     transport,
-                    exc_info=True,
+                    summary,
                 )
                 continue
             connections[server.name] = connection
@@ -526,8 +536,9 @@ class McpToolCaller:
             result = self._request("call", *route, arguments)
             text = _result_to_text(result)
         except Exception as exc:  # noqa: BLE001 - tool errors are model-visible results
-            logger.error("MCP tool %s failed: %s", name, exc)
-            return f"[Tool error: {exc}]"
+            summary = safe_error_summary(exc)
+            logger.error("MCP tool %s failed: %s", name, summary)
+            return f"[Tool error: {summary}]"
 
         if len(text) > self.max_response_len:
             text = text[: self.max_response_len] + "\n... [truncated]"
