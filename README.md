@@ -193,6 +193,8 @@ negotiation, persistent sessions, and clean shutdown. Duplicate visible tool
 names require `tool_prefix` configuration.
 
 HTTP auth objects in `McpServerConfig` use `httpx2.Auth`, matching MCP SDK v2.
+HTTP redirects must keep the same scheme, host, and port. Configure the final
+endpoint URL when a server redirects to another origin.
 HTTP transports use the operating system trust store; set `SSL_CERT_FILE` or
 `SSL_CERT_DIR` for custom certificate authorities.
 

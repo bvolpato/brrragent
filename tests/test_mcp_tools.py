@@ -1,4 +1,5 @@
 import asyncio
+import io
 import logging
 import socket
 import subprocess
@@ -7,8 +8,10 @@ import time
 import urllib.error
 from concurrent.futures import Future
 from contextlib import asynccontextmanager
+from email.message import Message
 from threading import Event, Thread
 from types import SimpleNamespace
+from urllib.response import addinfourl
 
 import httpx2
 import pytest
@@ -425,6 +428,136 @@ def test_streamable_http_initializes_once_and_reuses_session(monkeypatch):
     assert len(sessions) == 1
     assert sessions[0].initialize_count == 1
     assert sessions[0].call_count == 1
+
+
+@pytest.mark.parametrize("transport", ["streamable_http", "sse"])
+@pytest.mark.parametrize(
+    ("destination", "allowed"),
+    [
+        ("https://other.example.test/next", False),
+        ("https://mcp.example.test:444/next", False),
+        ("http://mcp.example.test/next", False),
+        ("/next", True),
+        ("https://mcp.example.test:443/next", True),
+    ],
+)
+def test_http_transports_keep_redirects_on_the_same_origin(
+    monkeypatch, transport, destination, allowed
+):
+    requests = []
+    client_type = httpx2.AsyncClient
+
+    def respond(request):
+        requests.append(request)
+        if request.url.path == "/mcp":
+            return httpx2.Response(307, headers={"Location": destination})
+        return httpx2.Response(200, json={})
+
+    def client_factory(**kwargs):
+        return client_type(transport=httpx2.MockTransport(respond), **kwargs)
+
+    @asynccontextmanager
+    async def fake_transport(url, **kwargs):
+        if "http_client" in kwargs:
+            response = await kwargs["http_client"].get(url)
+        else:
+            from mcp.shared._httpx_utils import create_mcp_http_client
+
+            factory = kwargs.get("httpx_client_factory", create_mcp_http_client)
+            async with factory(
+                headers=kwargs["headers"], auth=kwargs["auth"]
+            ) as client:
+                response = await client.get(url, follow_redirects=True)
+        response.raise_for_status()
+        yield object(), object()
+
+    class FakeSession:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return None
+
+        async def initialize(self):
+            pass
+
+    monkeypatch.setattr(httpx2, "AsyncClient", client_factory)
+    monkeypatch.setattr(mcp_tools, "streamable_http_client", fake_transport)
+    monkeypatch.setattr(mcp_tools, "sse_client", fake_transport)
+    monkeypatch.setattr(mcp_tools, "ClientSession", FakeSession)
+    server = McpServerConfig(
+        name="redirect-test",
+        url="https://mcp.example.test/mcp",
+        transport=transport,
+        headers={"X-API-Key": "test-secret"},
+    )
+
+    async def connect():
+        connection = await McpToolCaller(servers=[server])._open_connection(
+            server, transport
+        )
+        await connection.stack.aclose()
+
+    if not allowed:
+        with pytest.raises(httpx2.HTTPStatusError, match="Cross-origin MCP redirect"):
+            asyncio.run(connect())
+        assert len(requests) == 1
+    else:
+        asyncio.run(connect())
+        assert len(requests) == 2
+        assert requests[1].headers["X-API-Key"] == "test-secret"
+
+
+@pytest.mark.parametrize(
+    ("destination", "allowed"),
+    [
+        ("http://other.example.test/next", False),
+        ("http://mcp.example.test:8080/next", False),
+        ("https://mcp.example.test/next", False),
+        ("/next", True),
+        ("http://mcp.example.test:80/next", True),
+    ],
+)
+def test_legacy_requests_keep_redirects_on_the_same_origin(
+    monkeypatch, destination, allowed
+):
+    requests = []
+
+    def respond(_handler, request):
+        requests.append(request)
+        headers = Message()
+        if request.full_url == "http://mcp.example.test/mcp":
+            headers["Location"] = destination
+            response = addinfourl(io.BytesIO(b""), headers, request.full_url, 302)
+        else:
+            response = addinfourl(
+                io.BytesIO(b'{"result": {}}'), headers, request.full_url, 200
+            )
+        response.msg = "test response"
+        return response
+
+    monkeypatch.setattr(mcp_tools.urllib.request.HTTPHandler, "http_open", respond)
+    server = McpServerConfig(
+        name="legacy-redirect",
+        url="http://mcp.example.test/mcp",
+        transport="legacy_json",
+        headers={"X-API-Key": "test-secret"},
+    )
+    caller = McpToolCaller(servers=[server])
+
+    if not allowed:
+        with pytest.raises(urllib.error.HTTPError, match="Cross-origin MCP redirect"):
+            caller._legacy_request(server, {"method": "tools/list"}, timeout=1)
+        assert len(requests) == 1
+    else:
+        assert caller._legacy_request(server, {"method": "tools/list"}, timeout=1) == {
+            "result": {}
+        }
+        assert len(requests) == 2
+        assert requests[1].get_header("X-api-key") == "test-secret"
 
 
 def test_auto_transport_falls_back_to_sse(monkeypatch):
