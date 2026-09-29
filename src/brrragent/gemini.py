@@ -195,11 +195,11 @@ def run_gemini_agent(
         )
     )
     candidate = response.candidates[0] if response.candidates else None
-    final_text = (
-        "\n".join(part.text for part in candidate.content.parts or [] if part.text)
-        if candidate
-        else ""
-    )
+    final_text = ""
+    if candidate and candidate.content:
+        final_text = "\n".join(
+            part.text for part in candidate.content.parts or [] if part.text
+        )
     logger.info(
         "[agent] Final no-tool response after max_turns (%d chars)", len(final_text)
     )
