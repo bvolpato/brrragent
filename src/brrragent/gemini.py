@@ -95,25 +95,8 @@ def run_gemini_agent(
 
     config = gt.GenerateContentConfig(**config_kwargs)
 
-    for turn in range(max_turns):
-        logger.info(
-            "[agent] Turn %d/%d — calling %s (gemini direct)",
-            turn + 1,
-            max_turns,
-            model,
-        )
-
-        response = _call_with_retry(
-            client=client,
-            model=model,
-            contents=contents,
-            config=config,
-            max_retries=max_retries,
-            key_pool=key_pool,
-            current_key=selected_key,
-        )
-
-        # If we got back a new key (pool rotation happened), rebuild the client
+    def track_response(response):
+        nonlocal client, selected_key
         if isinstance(response, tuple):
             response, new_key = response
             if new_key != selected_key:
@@ -122,10 +105,31 @@ def run_gemini_agent(
 
         if on_usage and getattr(response, "usage_metadata", None):
             on_usage(gemini_usage(response.usage_metadata))
+        return response
+
+    for turn in range(max_turns):
+        logger.info(
+            "[agent] Turn %d/%d — calling %s (gemini direct)",
+            turn + 1,
+            max_turns,
+            model,
+        )
+
+        response = track_response(
+            _call_with_retry(
+                client=client,
+                model=model,
+                contents=contents,
+                config=config,
+                max_retries=max_retries,
+                key_pool=key_pool,
+                current_key=selected_key,
+            )
+        )
 
         candidate = response.candidates[0] if response.candidates else None
         if not candidate:
-            break
+            return "[No final response after max tool turns]"
 
         model_parts = list(candidate.content.parts or [])
 
@@ -164,8 +168,42 @@ def run_gemini_agent(
         contents.append(gt.Content(role="user", parts=tool_result_parts))
         logger.debug("[agent] Turn %d: executed %d tool(s)", turn + 1, len(fn_calls))
 
-    logger.warning("[agent] Reached max_turns=%d without final text", max_turns)
-    return "[No final response after max tool turns]"
+    logger.warning(
+        "[agent] Reached max_turns=%d; requesting final answer without tools",
+        max_turns,
+    )
+    contents.append(
+        gt.Content(
+            role="user",
+            parts=[
+                gt.Part(
+                    text="Stop calling tools. Provide the final answer using the evidence already gathered."
+                )
+            ],
+        )
+    )
+    final_config = gt.GenerateContentConfig(**{**config_kwargs, "tools": []})
+    response = track_response(
+        _call_with_retry(
+            client=client,
+            model=model,
+            contents=contents,
+            config=final_config,
+            max_retries=max_retries,
+            key_pool=key_pool,
+            current_key=selected_key,
+        )
+    )
+    candidate = response.candidates[0] if response.candidates else None
+    final_text = (
+        "\n".join(part.text for part in candidate.content.parts or [] if part.text)
+        if candidate
+        else ""
+    )
+    logger.info(
+        "[agent] Final no-tool response after max_turns (%d chars)", len(final_text)
+    )
+    return final_text or "[No final response after max tool turns]"
 
 
 def _call_with_retry(

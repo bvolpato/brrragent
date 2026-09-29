@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import urllib.error
 import urllib.request
 from collections.abc import Iterable, Mapping
 from concurrent.futures import Future
@@ -44,6 +45,50 @@ _TRANSPORT_ALIASES = {
 }
 _VALID_TRANSPORTS = {"auto", "streamable_http", "sse", "stdio", "legacy_json"}
 _VALID_PREFIX = re.compile(r"^[A-Za-z0-9_-]*$")
+
+
+def _same_origin(source: str | httpx2.URL, destination: str | httpx2.URL) -> bool:
+    source, destination = httpx2.URL(source), httpx2.URL(destination)
+    return (source.scheme, source.host, source.port) == (
+        destination.scheme,
+        destination.host,
+        destination.port,
+    )
+
+
+async def _check_redirect_origin(response: httpx2.Response) -> None:
+    if response.has_redirect_location and not _same_origin(
+        response.request.url,
+        response.request.url.join(response.headers["Location"]),
+    ):
+        raise httpx2.HTTPStatusError(
+            "Cross-origin MCP redirect blocked",
+            request=response.request,
+            response=response,
+        )
+
+
+def _http_client_factory(
+    headers: dict[str, str] | None = None,
+    timeout: httpx2.Timeout | None = None,
+    auth: httpx2.Auth | None = None,
+) -> httpx2.AsyncClient:
+    return httpx2.AsyncClient(
+        headers={"User-Agent": "brrragent/1.0", **(headers or {})},
+        auth=auth,
+        follow_redirects=True,
+        timeout=timeout if timeout is not None else httpx2.Timeout(30, read=300),
+        event_hooks={"response": [_check_redirect_origin]},
+    )
+
+
+class _SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not _same_origin(req.full_url, newurl):
+            raise urllib.error.HTTPError(
+                req.full_url, code, "Cross-origin MCP redirect blocked", headers, fp
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 @dataclass(frozen=True)
@@ -363,14 +408,14 @@ class McpToolCaller:
                         timeout=min(server.timeout, 5),
                         sse_read_timeout=server.read_timeout,
                         auth=server.auth,
+                        httpx_client_factory=_http_client_factory,
                     )
                 )
             else:
                 http_client = await stack.enter_async_context(
-                    httpx2.AsyncClient(
-                        headers={"User-Agent": "brrragent/1.0", **server.headers},
+                    _http_client_factory(
+                        headers=dict(server.headers),
                         auth=server.auth,
-                        follow_redirects=True,
                         timeout=httpx2.Timeout(
                             server.timeout,
                             read=server.read_timeout,
@@ -419,7 +464,8 @@ class McpToolCaller:
             headers={**self._HEADERS, **server.headers},
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        opener = urllib.request.build_opener(_SameOriginRedirectHandler())
+        with opener.open(request, timeout=timeout) as response:
             return json.loads(response.read())
 
     def _legacy_list_tools(self, server: McpServerConfig) -> list[dict[str, Any]]:

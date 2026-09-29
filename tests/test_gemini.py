@@ -208,6 +208,75 @@ def test_gemini_agent_executes_tool_then_returns_schema_response(monkeypatch):
     assert config.response_schema is schema
 
 
+def test_gemini_agent_synthesizes_after_last_tool_turn_without_tools(monkeypatch):
+    responses = iter(
+        [
+            _response(
+                FakePart(
+                    function_call=SimpleNamespace(
+                        name="lookup", args={"query": "brrragent"}
+                    )
+                ),
+                usage={"prompt_token_count": 10, "total_token_count": 10},
+            ),
+            _response(
+                FakePart(text='{"answer":"synthesized"}'),
+                usage={"prompt_token_count": 20, "total_token_count": 20},
+            ),
+        ]
+    )
+    _, calls = _install_fake_google_sdk(
+        monkeypatch, lambda _key, _call_number, _kwargs: next(responses)
+    )
+    mcp = FakeMcp()
+    usages = []
+    schema = {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"],
+    }
+    image = ImageInput.from_bytes(b"png", media_type="image/png")
+
+    result = gemini.run_gemini_agent(
+        system_prompt="system",
+        user_prompt="question",
+        model="gemini-test",
+        api_key="fake-key",
+        mcp=mcp,
+        max_turns=1,
+        temperature=0.2,
+        max_tokens=321,
+        max_retries=1,
+        on_tool_call=None,
+        response_schema=schema,
+        on_usage=usages.append,
+        images=(image,),
+    )
+
+    assert result == '{"answer":"synthesized"}'
+    assert mcp.calls == [("lookup", {"query": "brrragent"})]
+    assert usages == [AgentUsage(10, 0, 10), AgentUsage(20, 0, 20)]
+    assert len(calls) == 2
+    assert calls[0]["config"].tools == mcp.tools
+    assert calls[1]["config"].tools == []
+    final_config = calls[1]["config"]
+    assert final_config.system_instruction == "system"
+    assert final_config.response_mime_type == "application/json"
+    assert final_config.response_schema is schema
+    final_contents = calls[1]["contents"]
+    assert [content.role for content in final_contents] == [
+        "user",
+        "model",
+        "user",
+        "user",
+    ]
+    assert final_contents[0].parts[1].source == "bytes"
+    assert final_contents[0].parts[1].data == b"png"
+    assert final_contents[2].parts[0].function_response.response == {
+        "result": "tool result"
+    }
+
+
 def test_gemini_agent_sends_data_and_url_images(monkeypatch):
     response = _response(FakePart(text="mushroom"))
     _, calls = _install_fake_google_sdk(

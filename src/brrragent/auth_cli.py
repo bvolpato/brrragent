@@ -68,7 +68,11 @@ def _poll_device_authorization(device: dict[str, Any], timeout: int) -> dict[str
 
     interval = max(int(device.get("interval") or 5), 1)
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f"Device authorization timed out after {timeout}s")
+
         body = json.dumps(
             {"device_auth_id": device_auth_id, "user_code": user_code}
         ).encode()
@@ -79,18 +83,29 @@ def _poll_device_authorization(device: dict[str, Any], timeout: int) -> dict[str
             method="POST",
         )
         try:
-            with request.urlopen(req, timeout=60) as response:
+            with request.urlopen(req, timeout=min(60, remaining)) as response:
                 value = json.loads(response.read().decode())
         except error.HTTPError as exc:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"Device authorization timed out after {timeout}s"
+                ) from exc
             if exc.code in {403, 404}:
-                time.sleep(interval + 3)
+                time.sleep(min(interval + 3, remaining))
                 continue
             detail = exc.read().decode(errors="replace")[:500]
             raise RuntimeError(
                 f"{DEVICE_TOKEN_URL} failed: HTTP {exc.code}; {detail}"
             ) from exc
         except (OSError, json.JSONDecodeError) as exc:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"Device authorization timed out after {timeout}s"
+                ) from exc
             raise RuntimeError(f"{DEVICE_TOKEN_URL} failed: {exc}") from exc
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"Device authorization timed out after {timeout}s")
 
         if (
             isinstance(value, dict)
@@ -99,7 +114,6 @@ def _poll_device_authorization(device: dict[str, Any], timeout: int) -> dict[str
         ):
             return value
         raise RuntimeError(f"Unexpected authorization response: {value!r}")
-    raise TimeoutError(f"Device authorization timed out after {timeout}s")
 
 
 def _exchange_tokens(authorization: dict[str, Any]) -> dict[str, Any]:

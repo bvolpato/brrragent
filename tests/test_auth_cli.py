@@ -58,10 +58,20 @@ def test_device_polling_retries_pending_authorization_then_succeeds(monkeypatch)
             raise response
         return response
 
+    now = 0.0
     sleeps = []
+
+    def monotonic():
+        return now
+
+    def sleep(seconds):
+        nonlocal now
+        sleeps.append(seconds)
+        now += seconds
+
     monkeypatch.setattr(auth_cli.request, "urlopen", urlopen)
-    monkeypatch.setattr(auth_cli.time, "monotonic", lambda: 0)
-    monkeypatch.setattr(auth_cli.time, "sleep", sleeps.append)
+    monkeypatch.setattr(auth_cli.time, "monotonic", monotonic)
+    monkeypatch.setattr(auth_cli.time, "sleep", sleep)
 
     result = auth_cli._poll_device_authorization(
         {"device_auth_id": "device", "user_code": "USER-CODE", "interval": 2},
@@ -73,22 +83,30 @@ def test_device_polling_retries_pending_authorization_then_succeeds(monkeypatch)
         "code_verifier": "verifier",
     }
     assert requests == [
-        ({"device_auth_id": "device", "user_code": "USER-CODE"}, 60),
-        ({"device_auth_id": "device", "user_code": "USER-CODE"}, 60),
+        ({"device_auth_id": "device", "user_code": "USER-CODE"}, 30),
+        ({"device_auth_id": "device", "user_code": "USER-CODE"}, 25),
     ]
     assert sleeps == [5]
 
 
 def test_device_polling_times_out_after_pending_authorization(monkeypatch):
-    monotonic_values = iter([10, 10, 16])
+    now = 10.0
     sleeps = []
 
     def pending(*_args, **_kwargs):
         raise _http_error(404)
 
+    def monotonic():
+        return now
+
+    def sleep(seconds):
+        nonlocal now
+        sleeps.append(seconds)
+        now += seconds
+
     monkeypatch.setattr(auth_cli.request, "urlopen", pending)
-    monkeypatch.setattr(auth_cli.time, "monotonic", lambda: next(monotonic_values))
-    monkeypatch.setattr(auth_cli.time, "sleep", sleeps.append)
+    monkeypatch.setattr(auth_cli.time, "monotonic", monotonic)
+    monkeypatch.setattr(auth_cli.time, "sleep", sleep)
 
     with pytest.raises(TimeoutError, match="timed out after 5s"):
         auth_cli._poll_device_authorization(
@@ -96,7 +114,66 @@ def test_device_polling_times_out_after_pending_authorization(monkeypatch):
             timeout=5,
         )
 
-    assert sleeps == [4]
+    assert sleeps == [4, 1]
+
+
+def test_device_polling_bounds_request_and_pending_sleep_by_deadline(monkeypatch):
+    now = 0.0
+    sleeps = []
+    request_timeouts = []
+
+    def monotonic():
+        return now
+
+    def sleep(seconds):
+        nonlocal now
+        sleeps.append(seconds)
+        now += seconds
+
+    def pending(req, timeout):
+        request_timeouts.append(timeout)
+        raise _http_error(403)
+
+    monkeypatch.setattr(auth_cli.request, "urlopen", pending)
+    monkeypatch.setattr(auth_cli.time, "monotonic", monotonic)
+    monkeypatch.setattr(auth_cli.time, "sleep", sleep)
+
+    with pytest.raises(TimeoutError, match="timed out after 5s"):
+        auth_cli._poll_device_authorization(
+            {
+                "device_auth_id": "device",
+                "user_code": "USER-CODE",
+                "interval": 120,
+            },
+            timeout=5,
+        )
+
+    assert request_timeouts == [5]
+    assert sleeps == [5]
+
+
+def test_device_polling_reports_deadline_timeout_after_request_timeout(monkeypatch):
+    now = 0.0
+    request_timeouts = []
+
+    def monotonic():
+        return now
+
+    def timed_out(_req, timeout):
+        nonlocal now
+        request_timeouts.append(timeout)
+        now += timeout
+        raise TimeoutError("request timed out")
+
+    monkeypatch.setattr(auth_cli.request, "urlopen", timed_out)
+    monkeypatch.setattr(auth_cli.time, "monotonic", monotonic)
+
+    with pytest.raises(TimeoutError, match="Device authorization timed out after 5s"):
+        auth_cli._poll_device_authorization(
+            {"device_auth_id": "device", "user_code": "USER-CODE"}, timeout=5
+        )
+
+    assert request_timeouts == [5]
 
 
 def test_device_polling_reports_non_pending_http_error(monkeypatch):

@@ -31,7 +31,7 @@ def parse_openai_model(model: str) -> tuple[str, str | None]:
 def _is_reasoning_model(model: str, reasoning_effort: str | None) -> bool:
     if reasoning_effort is not None:
         return True
-    return model.startswith(("gpt-5", "o1", "o3", "o4"))
+    return model.startswith(("gpt-5", "gpt-6", "o1", "o3", "o4"))
 
 
 def _build_chat_kwargs(

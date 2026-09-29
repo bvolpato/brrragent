@@ -191,6 +191,51 @@ def test_reasoning_model_with_tools_uses_responses_path():
     assert not _should_use_responses("openai/gpt-5.5:xhigh", [], None)
 
 
+@pytest.mark.parametrize(
+    "model",
+    ["openai/gpt-6-astra", "openai/gpt-6-sol", "openai/gpt-6-luna"],
+)
+def test_bare_gpt6_models_use_reasoning_token_fields(model):
+    kwargs = _build_chat_kwargs(
+        model=model,
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[],
+        temperature=0.4,
+        max_tokens=4096,
+        response_format=None,
+    )
+
+    assert kwargs["max_completion_tokens"] == 4096
+    assert "max_tokens" not in kwargs
+    assert "temperature" not in kwargs
+
+
+@pytest.mark.parametrize(
+    "model",
+    ["openai/gpt-6-astra", "openai/gpt-6-sol", "openai/gpt-6-luna"],
+)
+def test_bare_gpt6_models_use_responses_for_tools_and_schemas(model):
+    tools = [{"type": "function", "function": {"name": "search"}}]
+    schema = {"type": "object", "properties": {}}
+
+    assert _should_use_responses(model, tools, None)
+    assert _should_use_responses(model, [], schema)
+
+    kwargs = _build_responses_kwargs(
+        model=model,
+        input_items=[{"role": "user", "content": "hi"}],
+        instructions="system",
+        tools=tools,
+        temperature=0.4,
+        max_tokens=4096,
+        response_schema=schema,
+    )
+    assert kwargs["max_output_tokens"] == 4096
+    assert "temperature" not in kwargs
+    assert kwargs["tools"][0]["name"] == "search"
+    assert kwargs["text"]["format"]["schema"] == schema
+
+
 def test_to_responses_tool_flattens_openai_function_tool():
     tool = _to_responses_tool(
         {
