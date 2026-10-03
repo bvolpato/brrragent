@@ -277,6 +277,29 @@ def test_gemini_agent_synthesizes_after_last_tool_turn_without_tools(monkeypatch
     }
 
 
+def test_gemini_agent_handles_contentless_regular_candidate(monkeypatch):
+    response = SimpleNamespace(
+        candidates=[SimpleNamespace(content=None)], usage_metadata=None
+    )
+    _install_fake_google_sdk(monkeypatch, lambda _key, _call_number, _kwargs: response)
+
+    result = gemini.run_gemini_agent(
+        system_prompt="system",
+        user_prompt="question",
+        model="gemini-test",
+        api_key="fake-key",
+        mcp=FakeMcp(),
+        max_turns=1,
+        temperature=0.2,
+        max_tokens=321,
+        max_retries=1,
+        on_tool_call=None,
+        response_schema=None,
+    )
+
+    assert result == "[No final response after max tool turns]"
+
+
 def test_gemini_agent_handles_contentless_final_candidate(monkeypatch):
     responses = iter(
         [
