@@ -128,7 +128,7 @@ def run_gemini_agent(
         )
 
         candidate = response.candidates[0] if response.candidates else None
-        if not candidate:
+        if not candidate or candidate.content is None:
             return "[No final response after max tool turns]"
 
         model_parts = list(candidate.content.parts or [])
