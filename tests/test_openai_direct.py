@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from brrragent import ImageInput, PromptCacheConfig
+from brrragent._tool_calls import INVALID_TOOL_ARGUMENTS
 from brrragent.openai_direct import (
     _build_chat_kwargs,
     _build_responses_kwargs,
@@ -509,8 +510,8 @@ def test_responses_agent_synthesizes_after_max_turns_and_handles_invalid_json(
     )
 
     assert result == "Synthesized without more tools"
-    assert mcp.calls == [("lookup", {})]
-    assert tool_events == mcp.calls
+    assert mcp.calls == []
+    assert tool_events == []
     assert usage_events == [
         AgentUsage(input_tokens=5, output_tokens=1, total_tokens=6),
         AgentUsage(input_tokens=8, output_tokens=4, total_tokens=12),
@@ -531,7 +532,7 @@ def test_responses_agent_synthesizes_after_max_turns_and_handles_invalid_json(
         {
             "type": "function_call_output",
             "call_id": "call_bad_json",
-            "output": '{"result":"tool evidence"}',
+            "output": INVALID_TOOL_ARGUMENTS,
         },
         {
             "role": "user",

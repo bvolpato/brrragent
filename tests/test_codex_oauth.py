@@ -2,6 +2,7 @@ import io
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import Mock
 from urllib.error import HTTPError
 
 import pytest
@@ -549,6 +550,140 @@ def test_stream_codex_response_parses_sse_result(monkeypatch):
     assert captured["req"].get_header("Authorization") == "Bearer test-token"
 
 
+def _sse_response(*events):
+    return io.BytesIO(
+        b"".join(b"data: " + json.dumps(event).encode() + b"\n\n" for event in events)
+        + b"data: [DONE]\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        {"type": "response.failed", "response": {"status": "failed"}},
+        {
+            "type": "response.failed",
+            "response": {
+                "status": "failed",
+                "error": {"code": "server_error", "message": "private details"},
+            },
+        },
+        {"type": "error", "code": "invalid_prompt", "message": "private details"},
+        {
+            "type": "response.incomplete",
+            "response": {
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+            },
+        },
+    ],
+)
+def test_stream_codex_response_rejects_terminal_failures(monkeypatch, failure):
+    monkeypatch.setattr(
+        "brrragent.codex_oauth.request.urlopen",
+        lambda *_args, **_kwargs: _sse_response(
+            {"type": "response.output_text.delta", "delta": "partial answer"},
+            failure,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="Codex Responses stream") as exc:
+        _stream_codex_response({}, {})
+
+    assert failure["type"] in str(exc.value)
+    assert "private details" not in str(exc.value)
+    assert "partial answer" not in str(exc.value)
+
+
+@pytest.fixture
+def streamed_codex_agent(monkeypatch):
+    monkeypatch.setattr(
+        "brrragent.codex_oauth._get_codex_access_token", lambda: ("test-token", None)
+    )
+    mcp = Mock()
+    mcp.get_openai_tools.return_value = []
+
+    def run(max_turns):
+        return run_codex_oauth_agent(
+            system_prompt="system",
+            user_prompt="user",
+            model="codex/gpt-5.4",
+            mcp=mcp,
+            extra_tools=None,
+            max_turns=max_turns,
+            temperature=0,
+            max_tokens=100,
+            max_retries=3,
+            on_tool_call=None,
+            response_schema=None,
+        )
+
+    return run
+
+
+@pytest.mark.parametrize("max_turns", [0, 1])
+@pytest.mark.parametrize(
+    "code", ["server_error", "rate_limit_exceeded", "vector_store_timeout"]
+)
+def test_codex_agent_recovers_from_stream_failure(
+    monkeypatch, streamed_codex_agent, max_turns, code
+):
+    urlopen = Mock(
+        side_effect=[
+            _sse_response(
+                {
+                    "type": "response.failed",
+                    "response": {"error": {"code": code, "message": "private details"}},
+                }
+            ),
+            _sse_response(
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "output": [
+                            {
+                                "type": "message",
+                                "content": [
+                                    {"type": "output_text", "text": "recovered"}
+                                ],
+                            }
+                        ]
+                    },
+                }
+            ),
+        ]
+    )
+    sleep = Mock()
+    monkeypatch.setattr("brrragent.codex_oauth.request.urlopen", urlopen)
+    monkeypatch.setattr("brrragent.codex_oauth.time.sleep", sleep)
+
+    assert streamed_codex_agent(max_turns) == "recovered"
+    assert urlopen.call_count == 2
+    sleep.assert_called_once_with(2)
+
+
+@pytest.mark.parametrize("max_turns", [0, 1])
+@pytest.mark.parametrize("code,attempts", [("server_error", 3), ("invalid_prompt", 1)])
+def test_codex_agent_raises_stream_failure_with_bounded_retries(
+    monkeypatch, streamed_codex_agent, max_turns, code, attempts, caplog
+):
+    urlopen = Mock(
+        side_effect=lambda *_args, **_kwargs: _sse_response(
+            {"type": "error", "code": code, "message": "private details"}
+        )
+    )
+    sleep = Mock()
+    monkeypatch.setattr("brrragent.codex_oauth.request.urlopen", urlopen)
+    monkeypatch.setattr("brrragent.codex_oauth.time.sleep", sleep)
+
+    with pytest.raises(ValueError, match="Codex Responses stream"):
+        streamed_codex_agent(max_turns)
+
+    assert urlopen.call_count == attempts
+    assert sleep.call_count == attempts - 1
+    assert "private details" not in caplog.text
+
+
 def test_stream_codex_response_reports_http_error(monkeypatch):
     def fail_urlopen(_req, timeout):
         assert timeout == 31
@@ -628,6 +763,7 @@ def test_get_codex_access_token_persists_rotated_refresh(tmp_path, monkeypatch):
         )
     )
     monkeypatch.setenv("BRRRAGENT_OPENCODE_AUTH_PATH", str(auth_path))
+    monkeypatch.setenv("BRRRAGENT_CODEX_HOME", str(tmp_path / "codex-home"))
 
     calls = []
 

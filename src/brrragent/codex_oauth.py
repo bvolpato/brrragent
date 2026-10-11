@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib import error, parse, request
 
+from brrragent._tool_calls import execute_tool_call
 from brrragent.images import ImageInput, _responses_user_content
 from brrragent.openai_direct import _to_responses_tool, parse_openai_model
 from brrragent.prompt_cache import AgentUsage, PromptCacheConfig, openai_usage
@@ -40,6 +41,17 @@ _RETRYABLE_MARKERS = (
     "timeout",
     "temporarily unavailable",
 )
+_RETRYABLE_STREAM_CODES = (
+    "server_error",
+    "rate_limit_exceeded",
+    "vector_store_timeout",
+)
+
+
+class _CodexStreamError(ValueError):
+    def __init__(self, event_type: str, code: str | None = None) -> None:
+        self.code = code
+        super().__init__(f"Codex Responses stream failed: {event_type}")
 
 
 @dataclass(frozen=True)
@@ -429,10 +441,18 @@ def _stream_codex_response(
                     continue
 
                 event_type = event.get("type")
+                response_obj = event.get("response")
+                if event_type in {"response.failed", "response.incomplete", "error"}:
+                    details = (
+                        event
+                        if event_type == "error"
+                        else (response_obj or {}).get("error") or {}
+                    )
+                    raise _CodexStreamError(event_type, details.get("code"))
+
                 if event_type == "response.output_text.delta" and event.get("delta"):
                     text_parts.append(event["delta"])
 
-                response_obj = event.get("response")
                 if response_obj:
                     final_response = response_obj
                     response_id = response_obj.get("id") or response_id
@@ -498,6 +518,8 @@ def _build_payload(
 
 
 def _is_transient_error(err: Exception) -> bool:
+    if isinstance(err, _CodexStreamError):
+        return err.code in _RETRYABLE_STREAM_CODES
     err_str = str(err).lower()
     return any(marker in err_str for marker in _RETRYABLE_MARKERS)
 
@@ -599,16 +621,9 @@ def run_codex_oauth_agent(
         next_items = [*input_items]
         for tool_call in function_calls:
             fn_name = tool_call.get("name") or ""
-            try:
-                fn_args = json.loads(tool_call.get("arguments") or "{}")
-            except json.JSONDecodeError:
-                fn_args = {}
-
-            logger.info("[agent] Tool: %s(%s)", fn_name, list(fn_args.keys()))
-            if on_tool_call:
-                on_tool_call(fn_name, fn_args)
-
-            result_text = mcp.call_tool(fn_name, fn_args)
+            result_text = execute_tool_call(
+                mcp, fn_name, tool_call.get("arguments"), on_tool_call
+            )
             next_items.append(tool_call)
             next_items.append(
                 {
