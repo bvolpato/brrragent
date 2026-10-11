@@ -70,8 +70,7 @@ result = run_agent(
 Use `ImageInput(url)` for remote images, `ImageInput.from_base64(...)` for
 existing Base64 data, or `ImageInput.from_bytes(...)` for in-memory content.
 Multiple images preserve their input order. Detail can be `auto`, `low`,
-`high`, or `original`; provider and model support still applies. Codex Spark
-does not accept image input.
+`high`, or `original`; provider and model support still applies.
 
 Provider credentials are read from the caller's environment. Common variables
 are `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `OPENLUX_API_KEY`, and

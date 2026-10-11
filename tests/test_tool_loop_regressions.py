@@ -5,7 +5,9 @@ import httpx
 import pytest
 from openai import OpenAI
 
+import brrragent.codex_oauth as codex_oauth
 from brrragent import PromptCacheConfig, openai_direct, openrouter
+from brrragent._tool_calls import INVALID_TOOL_ARGUMENTS, execute_tool_call
 from brrragent.prompt_cache import AgentUsage
 
 
@@ -27,6 +29,26 @@ class RecordingMcp:
     def call_tool(self, name, arguments):
         self.calls.append((name, arguments))
         return "tool evidence"
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [None, "", "  ", "{not-json", "null", "[]", "42", '"text"'],
+)
+def test_execute_tool_call_rejects_invalid_arguments_without_side_effects(arguments):
+    mcp = RecordingMcp()
+    events = []
+
+    result = execute_tool_call(
+        mcp,
+        "lookup",
+        arguments,
+        on_tool_call=lambda name, args: events.append((name, args)),
+    )
+
+    assert result == INVALID_TOOL_ARGUMENTS
+    assert mcp.calls == []
+    assert events == []
 
 
 @pytest.mark.parametrize("max_turns", [1, 3])
@@ -270,3 +292,224 @@ def test_chat_limit_synthesizes_with_retry_and_preserves_options(
     ):
         assert synthesis.get(option) == first.get(option)
     assert usage == [AgentUsage(input_tokens=10, output_tokens=2, total_tokens=12)] * 2
+
+
+@pytest.mark.parametrize(
+    ("adapter", "arguments"),
+    [
+        (adapter, arguments)
+        for adapter in ("openai_chat", "openrouter_chat", "openai_responses")
+        for arguments in ("", "{not-json", "null", "[]", "42")
+    ],
+)
+def test_adapters_return_model_visible_error_for_invalid_tool_arguments(
+    monkeypatch, adapter, arguments
+):
+    requests = []
+
+    def respond(request):
+        payload = json.loads(request.content)
+        requests.append(payload)
+        if adapter == "openai_responses":
+            if len(requests) == 1:
+                output = [
+                    {
+                        "id": "fc_1",
+                        "type": "function_call",
+                        "call_id": "call_1",
+                        "name": "lookup",
+                        "arguments": arguments,
+                        "status": "completed",
+                    }
+                ]
+            else:
+                output = [
+                    {
+                        "id": "msg_final",
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": "Final answer"}],
+                    }
+                ]
+            return httpx.Response(
+                200,
+                json={
+                    "id": f"resp_{len(requests)}",
+                    "object": "response",
+                    "created_at": 0,
+                    "model": "gpt-5.6-luna",
+                    "output": output,
+                },
+            )
+
+        if len(requests) == 1:
+            message = {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": arguments},
+                    }
+                ],
+            }
+            finish_reason = "tool_calls"
+        else:
+            message = {"role": "assistant", "content": "Final answer"}
+            finish_reason = "stop"
+        return httpx.Response(
+            200,
+            json={
+                "id": f"chatcmpl_{len(requests)}",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "gpt-4o",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": message,
+                        "finish_reason": finish_reason,
+                    }
+                ],
+            },
+        )
+
+    mcp = RecordingMcp()
+    tool_events = []
+    with ExitStack() as stack:
+
+        def make_client(**kwargs):
+            return stack.enter_context(
+                OpenAI(
+                    **kwargs,
+                    http_client=httpx.Client(transport=httpx.MockTransport(respond)),
+                )
+            )
+
+        monkeypatch.setattr("openai.OpenAI", make_client)
+        if adapter == "openai_responses":
+            result = openai_direct.run_openai_agent(
+                system_prompt="Use evidence.",
+                user_prompt="Find the answer.",
+                model="openai/gpt-5.6-luna:medium",
+                api_key="fake-key",
+                mcp=mcp,
+                extra_tools=None,
+                max_turns=1,
+                temperature=0.2,
+                max_tokens=128,
+                max_retries=1,
+                on_tool_call=lambda name, args: tool_events.append((name, args)),
+                response_schema=None,
+            )
+        else:
+            provider = openrouter if adapter == "openrouter_chat" else openai_direct
+            run = (
+                provider.run_openrouter_agent
+                if provider is openrouter
+                else provider.run_openai_agent
+            )
+            kwargs = (
+                {"base_url": "https://openrouter.ai/api/v1"}
+                if provider is openrouter
+                else {}
+            )
+            result = run(
+                system_prompt="Use evidence.",
+                user_prompt="Find the answer.",
+                model="gpt-4o",
+                api_key="fake-key",
+                mcp=mcp,
+                extra_tools=None,
+                max_turns=1,
+                temperature=0.2,
+                max_tokens=128,
+                max_retries=1,
+                on_tool_call=lambda name, args: tool_events.append((name, args)),
+                response_schema=None,
+                **kwargs,
+            )
+
+    assert result == "Final answer"
+    assert mcp.calls == []
+    assert tool_events == []
+    assert len(requests) == 2
+    if adapter == "openai_responses":
+        assert {
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": INVALID_TOOL_ARGUMENTS,
+        } in requests[1]["input"]
+    else:
+        assert {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": INVALID_TOOL_ARGUMENTS,
+        } in requests[1]["messages"]
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected_tool_output", "expected_calls"),
+    [
+        (None, INVALID_TOOL_ARGUMENTS, []),
+        ("", INVALID_TOOL_ARGUMENTS, []),
+        ("{not-json", INVALID_TOOL_ARGUMENTS, []),
+        ("null", INVALID_TOOL_ARGUMENTS, []),
+        ("[]", INVALID_TOOL_ARGUMENTS, []),
+        ("42", INVALID_TOOL_ARGUMENTS, []),
+        ("{}", "tool evidence", [("lookup", {})]),
+    ],
+)
+def test_codex_adapter_validates_tool_arguments_and_preserves_call_id(
+    monkeypatch, arguments, expected_tool_output, expected_calls
+):
+    payloads = []
+    mcp = RecordingMcp()
+    tool_events = []
+
+    def fake_stream(payload, _headers, timeout):
+        assert timeout > 0
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return {
+                "function_calls": [
+                    {
+                        "type": "function_call",
+                        "call_id": "codex_call_1",
+                        "name": "lookup",
+                        "arguments": arguments,
+                    }
+                ]
+            }
+        return {"text": "Final answer", "function_calls": []}
+
+    monkeypatch.setattr(
+        codex_oauth, "_get_codex_access_token", lambda: ("fake-token", "fake-account")
+    )
+    monkeypatch.setattr(codex_oauth, "_stream_codex_response", fake_stream)
+
+    result = codex_oauth.run_codex_oauth_agent(
+        system_prompt="Use evidence.",
+        user_prompt="Find the answer.",
+        model="codex/gpt-5.6-luna:medium",
+        mcp=mcp,
+        extra_tools=None,
+        max_turns=2,
+        temperature=0.2,
+        max_tokens=128,
+        max_retries=1,
+        on_tool_call=lambda name, args: tool_events.append((name, args)),
+        response_schema=None,
+    )
+
+    assert result == "Final answer"
+    assert mcp.calls == expected_calls
+    assert tool_events == expected_calls
+    assert len(payloads) == 2
+    assert {
+        "type": "function_call_output",
+        "call_id": "codex_call_1",
+        "output": expected_tool_output,
+    } in payloads[1]["input"]

@@ -5,12 +5,12 @@ Supports KeyPool-based 429 eviction: when a key hits rate limits, the
 pool evicts it and the agent retries with a fresh key.
 """
 
-import json
 import logging
 import time
 from collections.abc import Callable
 
 from brrragent._errors import safe_error_summary
+from brrragent._tool_calls import execute_tool_call
 from brrragent.images import ImageInput, _chat_user_content
 from brrragent.keys import KeyPool
 from brrragent.prompt_cache import AgentUsage, PromptCacheConfig, openai_usage
@@ -177,16 +177,12 @@ def run_openrouter_agent(
 
             for tool_call in message.tool_calls:
                 fn_name = tool_call.function.name
-                try:
-                    fn_args = json.loads(tool_call.function.arguments)
-                except json.JSONDecodeError:
-                    fn_args = {}
-
-                logger.info("[agent] Tool: %s(%s)", fn_name, list(fn_args.keys()))
-                if on_tool_call:
-                    on_tool_call(fn_name, fn_args)
-
-                result_text = mcp.call_tool(fn_name, fn_args)
+                result_text = execute_tool_call(
+                    mcp,
+                    fn_name,
+                    tool_call.function.arguments,
+                    on_tool_call=on_tool_call,
+                )
                 messages.append(
                     {
                         "role": "tool",
