@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib import error, parse, request
 
+from brrragent._errors import safe_error_summary
 from brrragent._tool_calls import execute_tool_call
 from brrragent.images import ImageInput, _responses_user_content
 from brrragent.openai_direct import _to_responses_tool, parse_openai_model
@@ -46,6 +47,13 @@ _RETRYABLE_STREAM_CODES = (
     "rate_limit_exceeded",
     "vector_store_timeout",
 )
+_RETRYABLE_HTTP_STATUS_CODES = (429, 500, 502, 503, 504)
+
+
+class _CodexHTTPError(ValueError):
+    def __init__(self, operation: str, status_code: int) -> None:
+        self.status_code = status_code
+        super().__init__(f"{operation} failed: HTTP {status_code}")
 
 
 class _CodexStreamError(ValueError):
@@ -321,10 +329,8 @@ def _refresh_access_token(openai_auth: dict) -> tuple[dict, str, str | None]:
         with request.urlopen(req, timeout=60) as resp:
             payload = json.loads(resp.read().decode())
     except error.HTTPError as exc:
-        detail = exc.read().decode(errors="replace")[:500]
-        raise ValueError(
-            f"Codex OAuth refresh failed: HTTP {exc.code}; {detail}"
-        ) from exc
+        exc.close()
+        raise _CodexHTTPError("Codex OAuth refresh", exc.code) from exc
     except Exception as exc:
         raise ValueError(f"Codex OAuth refresh failed: {exc}") from exc
 
@@ -464,8 +470,8 @@ def _stream_codex_response(
                     output_items.append(item)
 
     except error.HTTPError as exc:
-        detail = exc.read().decode(errors="replace")[:1000]
-        raise ValueError(f"Codex Responses failed: HTTP {exc.code}; {detail}") from exc
+        exc.close()
+        raise _CodexHTTPError("Codex Responses", exc.code) from exc
 
     if output_items:
         final_response = {**(final_response or {}), "output": output_items}
@@ -520,6 +526,8 @@ def _build_payload(
 def _is_transient_error(err: Exception) -> bool:
     if isinstance(err, _CodexStreamError):
         return err.code in _RETRYABLE_STREAM_CODES
+    if isinstance(err, _CodexHTTPError):
+        return err.status_code in _RETRYABLE_HTTP_STATUS_CODES
     err_str = str(err).lower()
     return any(marker in err_str for marker in _RETRYABLE_MARKERS)
 
@@ -594,7 +602,7 @@ def run_codex_oauth_agent(
                     "[agent] Codex OAuth attempt %d/%d failed: %s",
                     attempt,
                     max_retries,
-                    str(exc)[:200],
+                    safe_error_summary(exc),
                 )
                 if not _is_transient_error(exc) or attempt >= max_retries:
                     raise
@@ -678,7 +686,7 @@ def run_codex_oauth_agent(
                 "[agent] Codex OAuth final synthesis attempt %d/%d failed: %s",
                 attempt,
                 max_retries,
-                str(exc)[:200],
+                safe_error_summary(exc),
             )
             if not _is_transient_error(exc) or attempt >= max_retries:
                 raise

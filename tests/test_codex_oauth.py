@@ -18,6 +18,7 @@ from brrragent.codex_oauth import (
     _extract_function_calls,
     _extract_response_text,
     _get_codex_access_token,
+    _refresh_access_token,
     _stream_codex_response,
     _sync_codex_cli_auth,
     _write_auth_file,
@@ -663,6 +664,68 @@ def test_codex_agent_recovers_from_stream_failure(
 
 
 @pytest.mark.parametrize("max_turns", [0, 1])
+def test_codex_agent_retries_http_error_without_logging_provider_body(
+    monkeypatch, streamed_codex_agent, max_turns, caplog
+):
+    secret = "private provider response"
+
+    def fail_once(*_args, **_kwargs):
+        fail_once.calls += 1
+        if fail_once.calls == 1:
+            raise HTTPError(
+                "https://chatgpt.com/backend-api/codex/responses",
+                503,
+                "Service Unavailable",
+                hdrs=None,
+                fp=io.BytesIO(secret.encode()),
+            )
+        return _sse_response(
+            {
+                "type": "response.completed",
+                "response": {
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [{"type": "output_text", "text": "recovered"}],
+                        }
+                    ]
+                },
+            }
+        )
+
+    fail_once.calls = 0
+    sleep = Mock()
+    monkeypatch.setattr("brrragent.codex_oauth.request.urlopen", fail_once)
+    monkeypatch.setattr("brrragent.codex_oauth.time.sleep", sleep)
+
+    assert streamed_codex_agent(max_turns) == "recovered"
+    assert fail_once.calls == 2
+    sleep.assert_called_once_with(2)
+    assert "_CodexHTTPError (HTTP 503)" in caplog.text
+    assert secret not in caplog.text
+
+
+def test_refresh_access_token_omits_http_error_body(monkeypatch):
+    secret = "private refresh response"
+
+    def fail_urlopen(*_args, **_kwargs):
+        raise HTTPError(
+            "https://auth.openai.com/oauth/token",
+            401,
+            "Unauthorized",
+            hdrs=None,
+            fp=io.BytesIO(secret.encode()),
+        )
+
+    monkeypatch.setattr("brrragent.codex_oauth.request.urlopen", fail_urlopen)
+
+    with pytest.raises(ValueError, match="Codex OAuth refresh failed: HTTP 401") as exc:
+        _refresh_access_token({"refresh": "test-refresh-token"})
+
+    assert secret not in str(exc.value)
+
+
+@pytest.mark.parametrize("max_turns", [0, 1])
 @pytest.mark.parametrize("code,attempts", [("server_error", 3), ("invalid_prompt", 1)])
 def test_codex_agent_raises_stream_failure_with_bounded_retries(
     monkeypatch, streamed_codex_agent, max_turns, code, attempts, caplog
@@ -685,6 +748,8 @@ def test_codex_agent_raises_stream_failure_with_bounded_retries(
 
 
 def test_stream_codex_response_reports_http_error(monkeypatch):
+    secret = '{"error":"usage_limit_reached","detail":"private response"}'
+
     def fail_urlopen(_req, timeout):
         assert timeout == 31
         raise HTTPError(
@@ -692,16 +757,18 @@ def test_stream_codex_response_reports_http_error(monkeypatch):
             429,
             "Too Many Requests",
             hdrs=None,
-            fp=io.BytesIO(b'{"error":"usage_limit_reached"}'),
+            fp=io.BytesIO(secret.encode()),
         )
 
     monkeypatch.setattr("brrragent.codex_oauth.request.urlopen", fail_urlopen)
 
     with pytest.raises(
         ValueError,
-        match=r'Codex Responses failed: HTTP 429; \{"error":"usage_limit_reached"\}',
-    ):
+        match=r"Codex Responses failed: HTTP 429",
+    ) as exc:
         _stream_codex_response({}, {}, timeout=31)
+
+    assert secret not in str(exc.value)
 
 
 def test_has_opencode_oauth_reads_configured_path(tmp_path, monkeypatch):
