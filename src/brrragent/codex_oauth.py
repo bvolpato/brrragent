@@ -56,6 +56,10 @@ class _CodexHTTPError(ValueError):
         super().__init__(f"{operation} failed: HTTP {status_code}")
 
 
+class _CodexAuthRecoveryError(ValueError):
+    """Terminal, redacted failure of externally coordinated auth recovery."""
+
+
 class _CodexStreamError(ValueError):
     def __init__(self, event_type: str, code: str | None = None) -> None:
         self.code = code
@@ -72,12 +76,22 @@ class CodexAuthConfig:
     access_token_provider: Callable[[], tuple[str, str | None]] | None = field(
         default=None, repr=False
     )
+    rejected_access_token_provider: Callable[[str], tuple[str, str | None]] | None = (
+        field(default=None, repr=False)
+    )
 
     def __post_init__(self) -> None:
         if self.access_token_provider is not None and not callable(
             self.access_token_provider
         ):
             raise TypeError("Codex access_token_provider must be callable")
+        if self.rejected_access_token_provider is not None:
+            if not callable(self.rejected_access_token_provider):
+                raise TypeError("Codex rejected_access_token_provider must be callable")
+            if self.access_token_provider is None:
+                raise ValueError(
+                    "Codex rejected_access_token_provider requires access_token_provider"
+                )
         if (
             not self.profile
             and self.auth_path is None
@@ -378,28 +392,29 @@ def _refresh_access_token(openai_auth: dict) -> tuple[dict, str, str | None]:
     return refreshed_auth, access_token, account_id
 
 
+def _validate_provider_credentials(supplied) -> tuple[str, str | None]:
+    if not isinstance(supplied, tuple) or len(supplied) != 2:
+        raise ValueError(
+            "Codex access token provider must return (access_token, account_id)"
+        )
+    access_token, account_id = supplied
+    values = (access_token,) if account_id is None else (access_token, account_id)
+    for value in values:
+        if (
+            not isinstance(value, str)
+            or not value
+            or any(ord(character) <= 32 or ord(character) >= 127 for character in value)
+        ):
+            raise ValueError(
+                "Codex access token provider must return a nonempty token and optional account ID using visible ASCII characters"
+            )
+    return access_token, account_id
+
+
 def _get_codex_access_token() -> tuple[str, str | None]:
     active = _ACTIVE_AUTH_CONFIG.get()
     if active and active.access_token_provider is not None:
-        supplied = active.access_token_provider()
-        if not isinstance(supplied, tuple) or len(supplied) != 2:
-            raise ValueError(
-                "Codex access token provider must return (access_token, account_id)"
-            )
-        access_token, account_id = supplied
-        values = (access_token,) if account_id is None else (access_token, account_id)
-        for value in values:
-            if (
-                not isinstance(value, str)
-                or not value
-                or any(
-                    ord(character) <= 32 or ord(character) >= 127 for character in value
-                )
-            ):
-                raise ValueError(
-                    "Codex access token provider must return a nonempty token and optional account ID using visible ASCII characters"
-                )
-        return access_token, account_id
+        return _validate_provider_credentials(active.access_token_provider())
 
     path = _auth_path()
     with _exclusive_path_lock(path):
@@ -457,6 +472,48 @@ def _extract_function_calls(response_obj: dict | None) -> list[dict]:
     ]
 
 
+def _open_codex_response(req: request.Request, headers: dict[str, str], timeout: int):
+    try:
+        return request.urlopen(req, timeout=timeout)
+    except error.HTTPError as exc:
+        exc.close()
+        active = _ACTIVE_AUTH_CONFIG.get()
+        authorization = req.get_header("Authorization", "")
+        if (
+            exc.code != 401
+            or active is None
+            or active.rejected_access_token_provider is None
+            or not authorization.startswith("Bearer ")
+        ):
+            raise _CodexHTTPError("Codex Responses", exc.code) from exc
+
+        rejected = authorization.removeprefix("Bearer ")
+        try:
+            access_token, account_id = _validate_provider_credentials(
+                active.rejected_access_token_provider(rejected)
+            )
+        except Exception:
+            raise _CodexAuthRecoveryError(
+                "Codex rejected access token provider failed"
+            ) from None
+        if account_id != req.get_header("Chatgpt-account-id"):
+            raise _CodexAuthRecoveryError(
+                "Codex rejected access token provider changed the account"
+            ) from None
+        if access_token == rejected:
+            raise _CodexHTTPError("Codex Responses", 401) from None
+
+    headers["Authorization"] = f"Bearer {access_token}"
+    retry = request.Request(
+        CODEX_RESPONSES_URL, data=req.data, headers=headers, method="POST"
+    )
+    try:
+        return request.urlopen(retry, timeout=timeout)
+    except error.HTTPError as exc:
+        exc.close()
+        raise _CodexHTTPError("Codex Responses", exc.code) from exc
+
+
 def _stream_codex_response(
     payload: dict, headers: dict[str, str], timeout: int = 900
 ) -> dict:
@@ -471,8 +528,9 @@ def _stream_codex_response(
     final_response: dict | None = None
     response_id: str | None = None
 
+    response = _open_codex_response(req, headers, timeout)
     try:
-        with request.urlopen(req, timeout=timeout) as resp:
+        with response as resp:
             for raw_line in resp:
                 line = raw_line.decode(errors="replace").strip()
                 if not line.startswith("data: "):
@@ -563,6 +621,8 @@ def _build_payload(
 
 
 def _is_transient_error(err: Exception) -> bool:
+    if isinstance(err, _CodexAuthRecoveryError):
+        return False
     if isinstance(err, _CodexStreamError):
         return err.code in _RETRYABLE_STREAM_CODES
     if isinstance(err, _CodexHTTPError):

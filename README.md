@@ -141,6 +141,36 @@ propagate without falling back to auth files, and credential availability checks
 do not invoke the callback. This hook serves the HTTP OAuth backend; it does not
 create or synchronize credentials for a separately launched Codex CLI.
 
+To recover when the server rejects an access token before its recorded expiry,
+also configure `rejected_access_token_provider`:
+
+```python
+def replace_rejected_access(rejected_token: str) -> tuple[str, str | None]:
+    return credential_store.get_current_access_token(
+        "content-worker", rejected_access_token=rejected_token
+    )
+
+auth = CodexAuthConfig(
+    access_token_provider=shared_access_token,
+    rejected_access_token_provider=replace_rejected_access,
+)
+```
+
+This callback requires `access_token_provider`. It receives the exact rejected
+access token only when opening the native Responses request fails with HTTP 401,
+before a stream opens. The application must coordinate refreshes, reread durable
+state under its lock, and adopt a peer's newer token when available instead of
+refreshing the rejected token again. HTTP 401 indicates rejected authentication;
+it does not establish that the token expired.
+
+The callback must return a changed access token and the same account ID, including
+`None` when the original account ID was `None`. brrragent retries the request
+once, preserving its payload, timeout, and session ID. Later agent turns use the
+replacement token. Another HTTP 401 ends that request without another callback;
+returning the same token does not retry it. Callback failures, invalid credentials,
+and account changes are terminal, with redacted errors and no local fallback.
+Other HTTP statuses and errors after a stream opens do not invoke this callback.
+
 Named profiles live under `~/.cache/brrragent/profiles/<profile>/`. Run device
 login separately for every profile; copying an auth file also copies its
 rotating refresh token and does not provide isolation. `BRRRAGENT_PROFILE_ROOT`
