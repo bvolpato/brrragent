@@ -333,6 +333,32 @@ def test_run_agent_preserves_existing_codex_auth_context(monkeypatch, tmp_path):
     assert observed["auth_path"] == auth_path
 
 
+def test_run_agent_uses_external_codex_token_provider(monkeypatch):
+    observed = []
+
+    def fake_codex_agent(**kwargs):
+        from brrragent.codex_oauth import _get_codex_access_token
+
+        observed.append(_get_codex_access_token())
+        return "ok"
+
+    monkeypatch.setattr("brrragent.codex_oauth.run_codex_oauth_agent", fake_codex_agent)
+
+    assert (
+        agent.run_agent(
+            system_prompt="system",
+            user_prompt="user",
+            model="codex/gpt-5.4:xhigh",
+            mcp=DummyMcp(),
+            codex_auth=CodexAuthConfig(
+                access_token_provider=lambda: ("shared-access", "shared-account")
+            ),
+        )
+        == "ok"
+    )
+    assert observed == [("shared-access", "shared-account")]
+
+
 def test_run_agent_requires_api_key_when_no_pool(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY_PERSONAL", raising=False)

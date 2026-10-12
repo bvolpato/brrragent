@@ -215,7 +215,7 @@ def run_agent(
         response_schema: JSON Schema dict for structured output (optional).
         prompt_cache: Stable cache key and requested TTL for this prompt version.
         on_usage: Optional callback invoked with provider token and cache usage.
-        codex_auth: Per-call Codex credential profile or explicit file paths.
+        codex_auth: Per-call Codex profile, file paths, or access token provider.
         images: Image URLs, Base64 data URLs, bytes, or files created as ImageInput.
 
     Returns:
