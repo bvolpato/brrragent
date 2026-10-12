@@ -249,6 +249,24 @@ def test_external_provider_is_callable_and_hidden_from_config_repr():
     assert "secret" not in repr(CodexAuthConfig(access_token_provider=Provider()))
 
 
+def test_rejected_provider_requires_external_provider_and_hides_its_repr():
+    with pytest.raises(ValueError, match="requires access_token_provider"):
+        CodexAuthConfig(rejected_access_token_provider=lambda _token: ("access", None))
+    with pytest.raises(TypeError, match="must be callable"):
+        CodexAuthConfig(
+            access_token_provider=lambda: ("access", None),
+            rejected_access_token_provider="secret-refresh",
+        )
+    provider = Mock(return_value=("access", None))
+    provider.__repr__ = Mock(return_value="secret-refresh")
+    assert "secret-refresh" not in repr(
+        CodexAuthConfig(
+            access_token_provider=provider,
+            rejected_access_token_provider=provider,
+        )
+    )
+
+
 def test_concurrent_external_providers_preserve_profiles_and_restore_context():
     barrier = threading.Barrier(2)
     configs = [
@@ -673,6 +691,331 @@ def _sse_response(*events):
         b"".join(b"data: " + json.dumps(event).encode() + b"\n\n" for event in events)
         + b"data: [DONE]\n"
     )
+
+
+@pytest.mark.parametrize("replacement", ["refreshed-access", "peer-access"])
+def test_stream_recovers_pre_stream_401_with_rejected_access_provider(
+    monkeypatch, replacement, caplog
+):
+    provider = Mock(return_value=(replacement, "account"))
+    initial_provider = Mock(return_value=("stale-access", "account"))
+    auth = CodexAuthConfig(
+        access_token_provider=initial_provider,
+        rejected_access_token_provider=provider,
+    )
+    body = io.BytesIO(b"private provider response")
+    urlopen = Mock(
+        side_effect=[
+            HTTPError(
+                "https://chatgpt.com/backend-api/codex/responses",
+                401,
+                "Unauthorized",
+                None,
+                body,
+            ),
+            _sse_response({"type": "response.output_text.delta", "delta": "recovered"}),
+        ]
+    )
+    monkeypatch.setattr("brrragent.codex_oauth.request.urlopen", urlopen)
+    headers = _codex_headers("stale-access", "account", session_id="stable-session")
+    with codex_auth_context(auth):
+        assert (
+            _stream_codex_response({"input": []}, headers, timeout=31)["text"]
+            == "recovered"
+        )
+
+    provider.assert_called_once_with("stale-access")
+    initial_provider.assert_not_called()
+    assert urlopen.call_count == 2
+    first, second = (call.args[0] for call in urlopen.call_args_list)
+    assert first.get_header("Authorization") == "Bearer stale-access"
+    assert second.get_header("Authorization") == f"Bearer {replacement}"
+    assert first.data == second.data
+    assert second.get_header("Chatgpt-account-id") == "account"
+    assert second.get_header("Session_id") == "stable-session"
+    assert headers["Authorization"] == f"Bearer {replacement}"
+    assert all(call.kwargs["timeout"] == 31 for call in urlopen.call_args_list)
+    assert body.closed
+    assert "private provider response" not in caplog.text
+
+
+@pytest.mark.parametrize("same_access,expected_calls", [(False, 2), (True, 1)])
+def test_pre_stream_401_recovery_does_not_repeat_rejected_credentials(
+    monkeypatch, same_access, expected_calls, caplog
+):
+    provider = Mock(
+        return_value=("stale-access" if same_access else "new-access", None)
+    )
+
+    def reject(*_args, **_kwargs):
+        raise HTTPError(
+            "https://chatgpt.com/backend-api/codex/responses",
+            401,
+            "Unauthorized",
+            None,
+            io.BytesIO(b"secret response"),
+        )
+
+    urlopen = Mock(side_effect=reject)
+    monkeypatch.setattr("brrragent.codex_oauth.request.urlopen", urlopen)
+    with codex_auth_context(
+        CodexAuthConfig(
+            access_token_provider=lambda: ("stale-access", None),
+            rejected_access_token_provider=provider,
+        )
+    ):
+        with pytest.raises(ValueError, match="Codex Responses failed: HTTP 401"):
+            _stream_codex_response({}, _codex_headers("stale-access", None))
+
+    provider.assert_called_once_with("stale-access")
+    assert urlopen.call_count == expected_calls
+    assert "secret" not in caplog.text
+
+
+@pytest.mark.parametrize("status", [401, 403, 429, 500, 503])
+def test_auth_recovery_requires_401_and_an_explicit_callback(monkeypatch, status):
+    provider = Mock(return_value=("new-access", None))
+    urlopen = Mock(
+        side_effect=HTTPError(
+            "https://chatgpt.com/backend-api/codex/responses",
+            status,
+            "Synthetic failure",
+            None,
+            io.BytesIO(b"private body"),
+        )
+    )
+    monkeypatch.setattr("brrragent.codex_oauth.request.urlopen", urlopen)
+    with codex_auth_context(
+        CodexAuthConfig(
+            access_token_provider=lambda: ("stale-access", None),
+            rejected_access_token_provider=provider if status != 401 else None,
+        )
+    ):
+        with pytest.raises(ValueError, match=f"HTTP {status}"):
+            _stream_codex_response({}, _codex_headers("stale-access", None))
+    provider.assert_not_called()
+    assert urlopen.call_count == 1
+
+
+@pytest.mark.parametrize("stage", ["enter", "iteration"])
+def test_open_stream_401_never_invokes_auth_recovery(monkeypatch, stage):
+    provider = Mock(return_value=("new-access", None))
+
+    class Response:
+        def __enter__(self):
+            if stage == "enter":
+                self.fail()
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"type":"response.output_text.delta","delta":"partial"}\n'
+            self.fail()
+
+        def fail(self):
+            raise HTTPError(
+                "https://chatgpt.com/backend-api/codex/responses",
+                401,
+                "Unauthorized",
+                None,
+                io.BytesIO(b"secret stream body"),
+            )
+
+    urlopen = Mock(return_value=Response())
+    monkeypatch.setattr("brrragent.codex_oauth.request.urlopen", urlopen)
+    with codex_auth_context(
+        CodexAuthConfig(
+            access_token_provider=lambda: ("stale-access", None),
+            rejected_access_token_provider=provider,
+        )
+    ):
+        with pytest.raises(ValueError, match="Codex Responses failed: HTTP 401"):
+            _stream_codex_response({}, _codex_headers("stale-access", None))
+    provider.assert_not_called()
+    assert urlopen.call_count == 1
+
+
+@pytest.mark.parametrize(
+    "supplied",
+    [
+        None,
+        ["secret-access", "account"],
+        ("secret-access\r\n", "account"),
+        ("secret-access", "wrong-secret-account"),
+        ("secret-access", None),
+    ],
+)
+def test_rejected_provider_invalid_or_changed_account_stops_before_retry(
+    monkeypatch, supplied, caplog
+):
+    provider = Mock(return_value=supplied)
+    urlopen = Mock(
+        side_effect=HTTPError(
+            "https://chatgpt.com/backend-api/codex/responses",
+            401,
+            "Unauthorized",
+            None,
+            io.BytesIO(b"secret response"),
+        )
+    )
+    monkeypatch.setattr("brrragent.codex_oauth.request.urlopen", urlopen)
+    with codex_auth_context(
+        CodexAuthConfig(
+            access_token_provider=lambda: ("stale-access", "account"),
+            rejected_access_token_provider=provider,
+        )
+    ):
+        with pytest.raises(
+            ValueError, match="Codex rejected access token provider"
+        ) as captured:
+            _stream_codex_response({}, _codex_headers("stale-access", "account"))
+    provider.assert_called_once_with("stale-access")
+    assert urlopen.call_count == 1
+    assert "secret" not in str(captured.value)
+    assert "secret" not in caplog.text
+
+
+def test_rejected_provider_failure_is_redacted_and_never_transient(
+    monkeypatch, streamed_codex_agent, caplog
+):
+    provider = Mock(
+        side_effect=TimeoutError("500 temporarily unavailable secret token")
+    )
+    urlopen = Mock(
+        side_effect=HTTPError(
+            "https://chatgpt.com/backend-api/codex/responses",
+            401,
+            "Unauthorized",
+            None,
+            io.BytesIO(b"secret response"),
+        )
+    )
+    local = Mock(side_effect=AssertionError("local fallback must not run"))
+    sleep = Mock()
+    monkeypatch.setattr("brrragent.codex_oauth.request.urlopen", urlopen)
+    monkeypatch.setattr("brrragent.codex_oauth._auth_path", local)
+    monkeypatch.setattr("brrragent.codex_oauth.time.sleep", sleep)
+    with codex_auth_context(
+        CodexAuthConfig(
+            access_token_provider=lambda: ("test-token", None),
+            rejected_access_token_provider=provider,
+        )
+    ):
+        with pytest.raises(
+            ValueError, match="Codex rejected access token provider failed"
+        ) as captured:
+            streamed_codex_agent(1)
+    provider.assert_called_once_with("test-token")
+    assert urlopen.call_count == 1
+    sleep.assert_not_called()
+    local.assert_not_called()
+    assert captured.value.__suppress_context__
+    assert "secret" not in str(captured.value)
+    assert "secret" not in caplog.text
+
+
+def test_auth_recovery_preserves_new_headers_across_tool_turns(monkeypatch):
+    provider = Mock(return_value=("new-access", "account"))
+    initial_provider = Mock(return_value=("stale-access", "account"))
+    requests = []
+    responses = [
+        _sse_response(
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "search",
+                    "arguments": '{"q":"example"}',
+                },
+            }
+        ),
+        _sse_response({"type": "response.output_text.delta", "delta": "finished"}),
+    ]
+
+    def open_response(req, timeout):
+        requests.append(req)
+        if len(requests) == 1:
+            raise HTTPError(
+                req.full_url, 401, "Unauthorized", None, io.BytesIO(b"secret")
+            )
+        return responses.pop(0)
+
+    mcp = Mock()
+    mcp.get_openai_tools.return_value = [{"type": "function", "name": "search"}]
+    mcp.call_tool.return_value = "tool result"
+    monkeypatch.setattr("brrragent.codex_oauth.request.urlopen", open_response)
+    with codex_auth_context(
+        CodexAuthConfig(
+            access_token_provider=initial_provider,
+            rejected_access_token_provider=provider,
+        )
+    ):
+        assert (
+            run_codex_oauth_agent(
+                system_prompt="system",
+                user_prompt="user",
+                model="codex/gpt-5.4",
+                mcp=mcp,
+                extra_tools=None,
+                max_turns=1,
+                temperature=0,
+                max_tokens=100,
+                max_retries=1,
+                on_tool_call=None,
+                response_schema=None,
+            )
+            == "finished"
+        )
+    assert [req.get_header("Authorization") for req in requests] == [
+        "Bearer stale-access",
+        "Bearer new-access",
+        "Bearer new-access",
+    ]
+    assert len({req.get_header("Session_id") for req in requests}) == 1
+    provider.assert_called_once_with("stale-access")
+    initial_provider.assert_called_once_with()
+    mcp.call_tool.assert_called_once_with("search", {"q": "example"})
+
+
+def test_concurrent_rejected_providers_preserve_account_context(monkeypatch):
+    barrier = threading.Barrier(2)
+    providers = {
+        suffix: Mock(return_value=(f"new-{suffix}", f"account-{suffix}"))
+        for suffix in ("a", "b")
+    }
+
+    def open_response(req, timeout):
+        authorization = req.get_header("Authorization")
+        suffix = authorization.rsplit("-", 1)[1]
+        assert req.get_header("Chatgpt-account-id") == f"account-{suffix}"
+        if authorization == f"Bearer old-{suffix}":
+            barrier.wait(timeout=10)
+            raise HTTPError(req.full_url, 401, "Unauthorized", None, io.BytesIO())
+        assert authorization == f"Bearer new-{suffix}"
+        return _sse_response({"type": "response.output_text.delta", "delta": suffix})
+
+    def run(suffix):
+        with codex_auth_context(
+            CodexAuthConfig(
+                access_token_provider=lambda: (f"old-{suffix}", f"account-{suffix}"),
+                rejected_access_token_provider=providers[suffix],
+            )
+        ):
+            headers = _codex_headers(*_get_codex_access_token())
+            return _stream_codex_response({}, headers)["text"]
+
+    monkeypatch.setattr("brrragent.codex_oauth.request.urlopen", open_response)
+    with codex_auth_context(
+        CodexAuthConfig(access_token_provider=lambda: ("outer", None))
+    ):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            assert list(pool.map(run, ("a", "b"))) == ["a", "b"]
+        assert _get_codex_access_token() == ("outer", None)
+    for suffix, provider in providers.items():
+        provider.assert_called_once_with(f"old-{suffix}")
 
 
 @pytest.mark.parametrize(
