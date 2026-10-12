@@ -14,7 +14,7 @@ import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib import error, parse, request
 
@@ -64,15 +64,29 @@ class _CodexStreamError(ValueError):
 
 @dataclass(frozen=True)
 class CodexAuthConfig:
-    """Per-call Codex credential selection."""
+    """Per-call Codex credential selection or externally managed access tokens."""
 
     profile: str | None = None
     auth_path: str | Path | None = None
     codex_home: str | Path | None = None
+    access_token_provider: Callable[[], tuple[str, str | None]] | None = field(
+        default=None, repr=False
+    )
 
     def __post_init__(self) -> None:
-        if not self.profile and self.auth_path is None and self.codex_home is None:
-            raise ValueError("Codex auth config requires a profile or explicit paths")
+        if self.access_token_provider is not None and not callable(
+            self.access_token_provider
+        ):
+            raise TypeError("Codex access_token_provider must be callable")
+        if (
+            not self.profile
+            and self.auth_path is None
+            and self.codex_home is None
+            and self.access_token_provider is None
+        ):
+            raise ValueError(
+                "Codex auth config requires a profile, explicit paths, or access token provider"
+            )
         if self.profile:
             _validate_profile_name(self.profile)
             if self.auth_path is not None or self.codex_home is not None:
@@ -274,6 +288,9 @@ def _sync_codex_cli_auth(openai_auth: dict) -> None:
 
 
 def has_opencode_oauth() -> bool:
+    active = _ACTIVE_AUTH_CONFIG.get()
+    if active and active.access_token_provider is not None:
+        return True
     try:
         auth = _read_auth_file(_auth_path())
     except Exception:
@@ -362,6 +379,28 @@ def _refresh_access_token(openai_auth: dict) -> tuple[dict, str, str | None]:
 
 
 def _get_codex_access_token() -> tuple[str, str | None]:
+    active = _ACTIVE_AUTH_CONFIG.get()
+    if active and active.access_token_provider is not None:
+        supplied = active.access_token_provider()
+        if not isinstance(supplied, tuple) or len(supplied) != 2:
+            raise ValueError(
+                "Codex access token provider must return (access_token, account_id)"
+            )
+        access_token, account_id = supplied
+        values = (access_token,) if account_id is None else (access_token, account_id)
+        for value in values:
+            if (
+                not isinstance(value, str)
+                or not value
+                or any(
+                    ord(character) <= 32 or ord(character) >= 127 for character in value
+                )
+            ):
+                raise ValueError(
+                    "Codex access token provider must return a nonempty token and optional account ID using visible ASCII characters"
+                )
+        return access_token, account_id
+
     path = _auth_path()
     with _exclusive_path_lock(path):
         auth = _read_auth_file(path)

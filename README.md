@@ -123,6 +123,24 @@ Explicit paths are also supported with
 context-local, so concurrent use cases do not need to mutate process-wide
 environment variables.
 
+Applications that coordinate OAuth refreshes and persist credentials externally
+can supply a synchronous access token provider instead:
+
+```python
+def shared_access_token() -> tuple[str, str | None]:
+    # The application owns coordination, refresh, and durable token persistence.
+    return credential_store.get_current_access_token("content-worker")
+
+auth = CodexAuthConfig(access_token_provider=shared_access_token)
+```
+
+The callback returns `(access_token, account_id)` with `None` allowed for the
+account ID. It runs once per Codex agent call in that call's auth context.
+Configured providers take precedence over local credentials. Provider failures
+propagate without falling back to auth files, and credential availability checks
+do not invoke the callback. This hook serves the HTTP OAuth backend; it does not
+create or synchronize credentials for a separately launched Codex CLI.
+
 Named profiles live under `~/.cache/brrragent/profiles/<profile>/`. Run device
 login separately for every profile; copying an auth file also copies its
 rotating refresh token and does not provide isolation. `BRRRAGENT_PROFILE_ROOT`

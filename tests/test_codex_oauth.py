@@ -167,6 +167,123 @@ def test_codex_auth_config_rejects_ambiguous_selection(tmp_path):
         )
 
 
+def test_external_provider_does_not_read_or_sync_local_auth(monkeypatch):
+    provider = Mock(return_value=("shared-access", None))
+    local_path = Mock(side_effect=AssertionError("local auth must not be accessed"))
+    cli_sync = Mock(side_effect=AssertionError("CLI auth must not be synchronized"))
+    monkeypatch.setattr("brrragent.codex_oauth._auth_path", local_path)
+    monkeypatch.setattr("brrragent.codex_oauth._sync_codex_cli_auth", cli_sync)
+
+    with codex_auth_context(CodexAuthConfig(access_token_provider=provider)):
+        assert has_opencode_oauth()
+        provider.assert_not_called()
+        assert _get_codex_access_token() == ("shared-access", None)
+
+    provider.assert_called_once_with()
+    local_path.assert_not_called()
+    cli_sync.assert_not_called()
+
+
+def test_external_provider_failure_propagates_without_local_fallback(
+    monkeypatch, caplog
+):
+    failure = OSError("credential store unavailable")
+    provider = Mock(side_effect=failure)
+    local_path = Mock(side_effect=AssertionError("local auth must not be accessed"))
+    monkeypatch.setattr("brrragent.codex_oauth._auth_path", local_path)
+
+    with codex_auth_context(
+        CodexAuthConfig(profile="content-worker", access_token_provider=provider)
+    ):
+        assert has_opencode_oauth()
+        with pytest.raises(OSError) as captured:
+            _get_codex_access_token()
+
+    assert captured.value is failure
+    local_path.assert_not_called()
+    assert not caplog.records
+
+
+@pytest.mark.parametrize(
+    "supplied",
+    [
+        None,
+        ["secret-access", None],
+        ("secret-access",),
+        ("secret-access", None, "secret-refresh"),
+        (None, None),
+        ("", None),
+        ("secret-access\r\nInjected:secret", None),
+        ("secret-access", ""),
+        ("secret-access", 42),
+        ("secret-access", "account\tsecret"),
+        ("secret-access\x7f", None),
+        ("secret-access", "account\u0080"),
+    ],
+)
+def test_external_provider_rejects_invalid_values_without_exposing_them(
+    supplied, monkeypatch, caplog
+):
+    local_path = Mock(side_effect=AssertionError("local auth must not be accessed"))
+    monkeypatch.setattr("brrragent.codex_oauth._auth_path", local_path)
+    with codex_auth_context(CodexAuthConfig(access_token_provider=lambda: supplied)):
+        with pytest.raises(ValueError, match="Codex access token provider") as captured:
+            _get_codex_access_token()
+
+    assert "secret" not in str(captured.value)
+    assert not caplog.records
+    local_path.assert_not_called()
+
+
+def test_external_provider_is_callable_and_hidden_from_config_repr():
+    with pytest.raises(TypeError, match="must be callable"):
+        CodexAuthConfig(access_token_provider="secret-access")
+
+    class Provider:
+        def __call__(self):
+            return "secret-access", None
+
+        def __repr__(self):
+            return "secret-refresh"
+
+    assert "secret" not in repr(CodexAuthConfig(access_token_provider=Provider()))
+
+
+def test_concurrent_external_providers_preserve_profiles_and_restore_context():
+    barrier = threading.Barrier(2)
+    configs = [
+        CodexAuthConfig(
+            profile=f"worker-{suffix}",
+            access_token_provider=lambda suffix=suffix: (
+                f"access-{suffix}",
+                f"acct-{suffix}",
+            ),
+        )
+        for suffix in ("a", "b")
+    ]
+
+    def load_auth(config):
+        with codex_auth_context(config):
+            barrier.wait(timeout=10)
+            credentials = _get_codex_access_token()
+            with codex_auth_context(
+                CodexAuthConfig(access_token_provider=lambda: ("nested-access", None))
+            ):
+                assert _get_codex_access_token() == ("nested-access", None)
+            barrier.wait(timeout=10)
+            assert _get_codex_access_token() == credentials
+            return credentials
+
+    with codex_auth_context(
+        CodexAuthConfig(access_token_provider=lambda: ("outer-access", "outer-account"))
+    ):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(load_auth, configs))
+        assert _get_codex_access_token() == ("outer-access", "outer-account")
+
+    assert results == [("access-a", "acct-a"), ("access-b", "acct-b")]
+
+
 def test_parse_codex_model_strips_prefix_and_reasoning_suffix():
     assert parse_codex_model("codex/gpt-5.4:xhigh") == ("gpt-5.4", "xhigh")
     assert parse_codex_model("openai/gpt-5.4:high") == ("gpt-5.4", "high")
