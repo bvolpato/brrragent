@@ -62,6 +62,7 @@ class _CodexAuthRecoveryError(ValueError):
 
 class _CodexStreamError(ValueError):
     def __init__(self, event_type: str, code: str | None = None) -> None:
+        self.event_type = event_type
         self.code = code
         super().__init__(f"Codex Responses stream failed: {event_type}")
 
@@ -527,6 +528,7 @@ def _stream_codex_response(
     output_items: list[dict] = []
     final_response: dict | None = None
     response_id: str | None = None
+    completed = False
 
     response = _open_codex_response(req, headers, timeout)
     try:
@@ -537,6 +539,7 @@ def _stream_codex_response(
                     continue
                 data = line[6:]
                 if data == "[DONE]":
+                    completed = True
                     break
                 try:
                     event = json.loads(data)
@@ -566,9 +569,16 @@ def _stream_codex_response(
                 if item and event_type == "response.output_item.done":
                     output_items.append(item)
 
+                if event_type == "response.completed":
+                    completed = True
+                    break
+
     except error.HTTPError as exc:
         exc.close()
         raise _CodexHTTPError("Codex Responses", exc.code) from exc
+
+    if not completed:
+        raise _CodexStreamError("unexpected_eof")
 
     if output_items:
         final_response = {**(final_response or {}), "output": output_items}
@@ -624,9 +634,13 @@ def _is_transient_error(err: Exception) -> bool:
     if isinstance(err, _CodexAuthRecoveryError):
         return False
     if isinstance(err, _CodexStreamError):
-        return err.code in _RETRYABLE_STREAM_CODES
+        return err.event_type == "unexpected_eof" or err.code in _RETRYABLE_STREAM_CODES
     if isinstance(err, _CodexHTTPError):
         return err.status_code in _RETRYABLE_HTTP_STATUS_CODES
+    if isinstance(err, TimeoutError):
+        return True
+    if isinstance(err, error.URLError) and isinstance(err.reason, TimeoutError):
+        return True
     err_str = str(err).lower()
     return any(marker in err_str for marker in _RETRYABLE_MARKERS)
 

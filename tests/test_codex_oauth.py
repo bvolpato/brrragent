@@ -3,7 +3,7 @@ import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 import pytest
 
@@ -611,7 +611,13 @@ def test_stream_codex_response_parses_sse_result(monkeypatch):
                             "content": [
                                 {"type": "output_text", "text": "fallback text"}
                             ],
-                        }
+                        },
+                        {
+                            "type": "function_call",
+                            "call_id": "call_1",
+                            "name": "search",
+                            "arguments": '{"q":"test"}',
+                        },
                     ],
                     "usage": {
                         "input_tokens": 12,
@@ -623,21 +629,6 @@ def test_stream_codex_response_parses_sse_result(monkeypatch):
             }
         ).encode()
         + b"\n",
-        b"data: "
-        + json.dumps(
-            {
-                "type": "response.output_item.done",
-                "item": {
-                    "type": "function_call",
-                    "call_id": "call_1",
-                    "name": "search",
-                    "arguments": '{"q":"test"}',
-                },
-            }
-        ).encode()
-        + b"\n",
-        b"data: [DONE]\n",
-        b'data: {"type":"response.output_text.delta","delta":" ignored"}\n',
     ]
     captured = {}
 
@@ -686,11 +677,89 @@ def test_stream_codex_response_parses_sse_result(monkeypatch):
     assert captured["req"].get_header("Authorization") == "Bearer test-token"
 
 
+def test_stream_stops_reading_after_response_completed(monkeypatch):
+    event = {
+        "type": "response.completed",
+        "response": {
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "complete"}],
+                }
+            ]
+        },
+    }
+
+    class Response:
+        reads = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            self.reads += 1
+            if self.reads > 1:
+                raise TimeoutError("timed out")
+            return b"data: " + json.dumps(event).encode() + b"\n"
+
+    response = Response()
+    monkeypatch.setattr(
+        "brrragent.codex_oauth.request.urlopen", lambda *_args, **_kwargs: response
+    )
+
+    assert _stream_codex_response({}, {})["text"] == "complete"
+    assert response.reads == 1
+
+
 def _sse_response(*events):
     return io.BytesIO(
         b"".join(b"data: " + json.dumps(event).encode() + b"\n\n" for event in events)
         + b"data: [DONE]\n"
     )
+
+
+def _truncated_sse_response(*events):
+    return io.BytesIO(
+        b"".join(b"data: " + json.dumps(event).encode() + b"\n\n" for event in events)
+    )
+
+
+@pytest.mark.parametrize(
+    "response,expected_text",
+    [
+        (
+            _truncated_sse_response(
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "output": [
+                            {
+                                "type": "message",
+                                "content": [{"type": "output_text", "text": "done"}],
+                            }
+                        ]
+                    },
+                }
+            ),
+            "done",
+        ),
+        (io.BytesIO(b"data: [DONE]\n"), ""),
+    ],
+)
+def test_stream_accepts_explicit_success_terminal_without_other_marker(
+    monkeypatch, response, expected_text
+):
+    monkeypatch.setattr(
+        "brrragent.codex_oauth.request.urlopen", lambda *_args, **_kwargs: response
+    )
+
+    assert _stream_codex_response({}, {})["text"] == expected_text
 
 
 @pytest.mark.parametrize("replacement", ["refreshed-access", "peer-access"])
@@ -1079,7 +1148,126 @@ def streamed_codex_agent(monkeypatch):
             response_schema=None,
         )
 
+    run.mcp = mcp
     return run
+
+
+def _truncated_tool_response():
+    return _truncated_sse_response(
+        {"type": "response.output_text.delta", "delta": "partial"},
+        {
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "call_id": "call_truncated",
+                "name": "search",
+                "arguments": '{"q":"partial"}',
+            },
+        },
+    )
+
+
+def _completed_text_response(text):
+    return _sse_response(
+        {
+            "type": "response.completed",
+            "response": {
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": text}],
+                    }
+                ]
+            },
+        }
+    )
+
+
+def _socket_timeout_error(error_type):
+    return (
+        TimeoutError("timed out")
+        if error_type is TimeoutError
+        else URLError(TimeoutError("timed out"))
+    )
+
+
+@pytest.mark.parametrize("max_turns", [0, 1])
+def test_codex_agent_retries_truncated_stream_without_running_partial_tools(
+    monkeypatch, streamed_codex_agent, max_turns
+):
+    streamed_codex_agent.mcp.get_openai_tools.return_value = [
+        {"type": "function", "function": {"name": "search"}}
+    ]
+    streamed_codex_agent.mcp.call_tool.return_value = "tool result"
+    urlopen = Mock(
+        side_effect=[_truncated_tool_response(), _completed_text_response("recovered")]
+    )
+    sleep = Mock()
+    monkeypatch.setattr("brrragent.codex_oauth.request.urlopen", urlopen)
+    monkeypatch.setattr("brrragent.codex_oauth.time.sleep", sleep)
+
+    assert streamed_codex_agent(max_turns) == "recovered"
+    assert urlopen.call_count == 2
+    streamed_codex_agent.mcp.call_tool.assert_not_called()
+    sleep.assert_called_once_with(2)
+
+
+@pytest.mark.parametrize("max_turns", [0, 1])
+def test_codex_agent_bounds_retries_for_truncated_stream_without_running_tools(
+    monkeypatch, streamed_codex_agent, max_turns
+):
+    streamed_codex_agent.mcp.get_openai_tools.return_value = [
+        {"type": "function", "function": {"name": "search"}}
+    ]
+    streamed_codex_agent.mcp.call_tool.return_value = "tool result"
+    urlopen = Mock(side_effect=lambda *_args, **_kwargs: _truncated_tool_response())
+    sleep = Mock()
+    monkeypatch.setattr("brrragent.codex_oauth.request.urlopen", urlopen)
+    monkeypatch.setattr("brrragent.codex_oauth.time.sleep", sleep)
+
+    with pytest.raises(ValueError, match="Codex Responses stream"):
+        streamed_codex_agent(max_turns)
+
+    streamed_codex_agent.mcp.call_tool.assert_not_called()
+    assert urlopen.call_count == 3
+    assert sleep.call_count == 2
+
+
+@pytest.mark.parametrize("max_turns", [0, 1])
+@pytest.mark.parametrize("error_type", [TimeoutError, URLError])
+def test_codex_agent_retries_socket_timeouts(
+    monkeypatch, streamed_codex_agent, max_turns, error_type
+):
+    urlopen = Mock(
+        side_effect=[
+            _socket_timeout_error(error_type),
+            _completed_text_response("recovered"),
+        ]
+    )
+    sleep = Mock()
+    monkeypatch.setattr("brrragent.codex_oauth.request.urlopen", urlopen)
+    monkeypatch.setattr("brrragent.codex_oauth.time.sleep", sleep)
+
+    assert streamed_codex_agent(max_turns) == "recovered"
+    assert urlopen.call_count == 2
+    sleep.assert_called_once_with(2)
+
+
+@pytest.mark.parametrize("max_turns", [0, 1])
+@pytest.mark.parametrize("error_type", [TimeoutError, URLError])
+def test_codex_agent_bounds_socket_timeout_retries(
+    monkeypatch, streamed_codex_agent, max_turns, error_type
+):
+    urlopen = Mock(side_effect=[_socket_timeout_error(error_type) for _ in range(3)])
+    sleep = Mock()
+    monkeypatch.setattr("brrragent.codex_oauth.request.urlopen", urlopen)
+    monkeypatch.setattr("brrragent.codex_oauth.time.sleep", sleep)
+
+    with pytest.raises((TimeoutError, URLError), match="timed out"):
+        streamed_codex_agent(max_turns)
+
+    assert urlopen.call_count == 3
+    assert sleep.call_count == 2
 
 
 @pytest.mark.parametrize("max_turns", [0, 1])
