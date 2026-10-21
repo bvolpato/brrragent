@@ -68,3 +68,6 @@ source = ["brrragent"]
 fail_under = 75
 show_missing = true
 skip_covered = true
+
+[tool.uv]
+exclude-newer = "7 days"
