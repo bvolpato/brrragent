@@ -81,9 +81,13 @@ def test_generate_content_404_is_not_retried_or_evicted(backend, error_kind):
         error = ProviderError(message, status_code=404)
     elif backend == "gemini":
         genai_errors = pytest.importorskip("google.genai.errors")
-        error = genai_errors.ClientError(
-            404, {"error": {"code": 404, "message": message}}
+        response = SimpleNamespace(
+            status_code=404,
+            body_segments=[{"error": {"code": 404, "message": message}}],
         )
+        with pytest.raises(genai_errors.ClientError) as provider_error:
+            genai_errors.APIError.raise_for_response(response)
+        error = provider_error.value
     else:
         error = RuntimeError(message)
     create = Mock(side_effect=error)
