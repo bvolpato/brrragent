@@ -9,7 +9,11 @@ import logging
 import time
 from collections.abc import Callable
 
-from brrragent._errors import safe_error_summary
+from brrragent._errors import (
+    is_rate_limit_error,
+    is_transient_error,
+    safe_error_summary,
+)
 from brrragent._tool_calls import execute_tool_call
 from brrragent.images import ImageInput, _chat_user_content
 from brrragent.keys import KeyPool
@@ -35,12 +39,6 @@ def _system_content(
             "cache_control": cache_control,
         }
     ]
-
-
-def _is_rate_limit_error(err: Exception) -> bool:
-    """Check if an error is a 429 / rate-limit error."""
-    err_str = str(err).lower()
-    return any(p in err_str for p in ("429", "rate", "quota"))
 
 
 def run_openrouter_agent(
@@ -260,9 +258,7 @@ def _call_with_retry(
             return resp
         except Exception as e:
             last_err = e
-            err_str = str(e).lower()
-
-            if _is_rate_limit_error(e) and key_pool:
+            if is_rate_limit_error(e) and key_pool:
                 logger.warning(
                     "[agent] OpenRouter 429 (attempt %d/%d): %s",
                     attempt,
@@ -281,10 +277,7 @@ def _call_with_retry(
                 logger.info("[agent] Rotated OpenRouter key, retrying immediately")
                 continue
 
-            is_transient = any(
-                p in err_str
-                for p in ("500", "503", "429", "unavailable", "overloaded", "rate")
-            )
+            is_transient = is_transient_error(e)
 
             logger.warning(
                 "[agent] API call attempt %d/%d failed: %s",

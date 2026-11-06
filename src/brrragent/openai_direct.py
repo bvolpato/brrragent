@@ -8,7 +8,11 @@ import logging
 import time
 from collections.abc import Callable
 
-from brrragent._errors import safe_error_summary
+from brrragent._errors import (
+    is_rate_limit_error,
+    is_transient_error,
+    safe_error_summary,
+)
 from brrragent._tool_calls import execute_tool_call
 from brrragent.images import ImageInput, _chat_user_content, _responses_user_content
 from brrragent.keys import KeyPool
@@ -180,28 +184,6 @@ def _response_final_text(response) -> str:
                 if value:
                     parts.append(value)
     return "\n".join(parts)
-
-
-def _is_rate_limit_error(err: Exception) -> bool:
-    err_str = str(err).lower()
-    return any(p in err_str for p in ("429", "rate", "quota"))
-
-
-def _is_transient_error(err: Exception) -> bool:
-    err_str = str(err).lower()
-    return any(
-        p in err_str
-        for p in (
-            "500",
-            "502",
-            "503",
-            "504",
-            "429",
-            "unavailable",
-            "overloaded",
-            "rate",
-        )
-    )
 
 
 def run_openai_agent(
@@ -517,7 +499,7 @@ def _call_with_retry(
         except Exception as e:
             last_err = e
 
-            if _is_rate_limit_error(e) and key_pool:
+            if is_rate_limit_error(e) and key_pool:
                 logger.warning(
                     "[agent] OpenAI 429 (attempt %d/%d): %s",
                     attempt,
@@ -537,11 +519,11 @@ def _call_with_retry(
                 safe_error_summary(e),
             )
 
-            if _is_transient_error(e) and attempt < max_retries:
+            if is_transient_error(e) and attempt < max_retries:
                 wait = min(2**attempt, 30)
                 logger.info("[agent] Transient OpenAI error, retrying in %ds", wait)
                 time.sleep(wait)
-            elif not _is_transient_error(e):
+            elif not is_transient_error(e):
                 raise
 
     raise ValueError(
@@ -585,7 +567,7 @@ def _call_responses_with_retry(
         except Exception as e:
             last_err = e
 
-            if _is_rate_limit_error(e) and key_pool:
+            if is_rate_limit_error(e) and key_pool:
                 logger.warning(
                     "[agent] OpenAI 429 (attempt %d/%d): %s",
                     attempt,
@@ -605,11 +587,11 @@ def _call_responses_with_retry(
                 safe_error_summary(e),
             )
 
-            if _is_transient_error(e) and attempt < max_retries:
+            if is_transient_error(e) and attempt < max_retries:
                 wait = min(2**attempt, 30)
                 logger.info("[agent] Transient OpenAI error, retrying in %ds", wait)
                 time.sleep(wait)
-            elif not _is_transient_error(e):
+            elif not is_transient_error(e):
                 raise
 
     raise ValueError(

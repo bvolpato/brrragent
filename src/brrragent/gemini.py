@@ -12,18 +12,16 @@ import logging
 import time
 from collections.abc import Callable
 
-from brrragent._errors import safe_error_summary
+from brrragent._errors import (
+    is_rate_limit_error,
+    is_transient_error,
+    safe_error_summary,
+)
 from brrragent.images import ImageInput, _decode_data_url
 from brrragent.keys import KeyPool
 from brrragent.prompt_cache import AgentUsage, PromptCacheConfig, gemini_usage
 
 logger = logging.getLogger(__name__)
-
-
-def _is_rate_limit_error(err: Exception) -> bool:
-    """Check if an error is a 429 / quota / rate-limit error."""
-    err_str = str(err)
-    return any(p in err_str for p in ("429", "RESOURCE_EXHAUSTED", "quota", "rate"))
 
 
 def run_gemini_agent(
@@ -239,9 +237,8 @@ def _call_with_retry(
             return resp
         except Exception as e:
             last_err = e
-            err_str = str(e)
 
-            if _is_rate_limit_error(e) and key_pool:
+            if is_rate_limit_error(e) and key_pool:
                 logger.warning(
                     "[agent] Gemini 429 (attempt %d/%d): %s",
                     attempt,
@@ -258,18 +255,7 @@ def _call_with_retry(
                 logger.info("[agent] Rotated Gemini key, retrying immediately")
                 continue
 
-            is_transient = any(
-                p in err_str
-                for p in (
-                    "500",
-                    "503",
-                    "429",
-                    "UNAVAILABLE",
-                    "INTERNAL",
-                    "overloaded",
-                    "rate",
-                )
-            )
+            is_transient = is_transient_error(e)
 
             logger.warning(
                 "[agent] Gemini call attempt %d/%d failed: %s",
