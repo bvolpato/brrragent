@@ -73,12 +73,15 @@ Multiple images preserve their input order. Detail can be `auto`, `low`,
 `high`, or `original`; provider and model support still applies.
 
 Provider credentials are read from the caller's environment. Common variables
-are `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `OPENLUX_API_KEY`, and
-`GEMINI_API_KEY`.
+are `OPENAI_API_KEY` (combined with `OPENAI_API_KEY_PERSONAL` and
+`OPENAI_API_KEY_CORP` in the OpenAI key pool), `OPENROUTER_API_KEY`,
+`GEMINI_API_KEY`, `FIREWORKS_API_KEY`, `MINIMAX_API_KEY`, `OPENLUX_API_KEY`,
+and `ZAI_API_KEY`.
 
-Use `openlux/<model>` for OpenLux-native routing. Legacy `yunwu/<model>`
-aliases remain accepted; `YUNWU_API_KEY` is used only when
-`OPENLUX_API_KEY` is unset.
+Native OpenAI-compatible prefixes `fireworks/<model>`, `minimax/<model>`,
+`openlux/<model>` (legacy `yunwu/<model>` falls back to `YUNWU_API_KEY`), and
+`z-ai/<model>` (optional `ZAI_BASE_URL` and `ZAI_REASONING_EFFORT`) route
+directly when their API key is set and fall back to OpenRouter otherwise.
 
 ## Codex OAuth
 
@@ -246,7 +249,8 @@ HTTP transports use the operating system trust store; set `SSL_CERT_FILE` or
 `SSL_CERT_DIR` for custom certificate authorities.
 
 `BRRRAGENT_MCP_URL` configures one default endpoint. `BRRRAGENT_MCP_URLS`
-accepts comma-separated endpoints.
+accepts comma-separated endpoints. When `mcp` is omitted and neither variable
+is set, `run_agent` runs without MCP tools.
 
 Tool filters accept exact names and case-sensitive shell patterns such as
 `*_search`. Exclusions apply during discovery and execution.
@@ -256,11 +260,15 @@ Tool filters accept exact names and case-sensitive shell patterns such as
 ```python
 from brrragent import (
     AgentUsage,
+    CodexAuthConfig,
+    ImageDetail,
+    ImageInput,
     KeyPool,
     McpServerConfig,
     McpToolCaller,
     PromptCacheConfig,
     RateLimitExhausted,
+    codex_auth_context,
     get_default_caller,
     pick_env_key,
     pick_key,

@@ -193,14 +193,28 @@ class McpToolCaller:
         self._tool_routes: dict[str, tuple[str, str]] = {}
         self._cache_lock = RLock()
         self._worker_lock = Lock()
+        self._notify_lock = Lock()
         self._commands: Queue[_WorkerCommand] = Queue()
         self._worker_thread: Thread | None = None
+        self._worker_loop: asyncio.AbstractEventLoop | None = None
+        self._worker_wakeup: asyncio.Event | None = None
 
     def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *_exc: object) -> None:
         self.close()
+
+    def _notify_worker(self) -> None:
+        with self._notify_lock:
+            loop = self._worker_loop
+            wakeup = self._worker_wakeup
+            if loop is None or wakeup is None or loop.is_closed():
+                return
+            try:
+                loop.call_soon_threadsafe(wakeup.set)
+            except RuntimeError:
+                return
 
     def close(self) -> None:
         """Close initialized MCP sessions and their transports."""
@@ -210,6 +224,7 @@ class McpToolCaller:
                 return
             future: Future[Any] = Future()
             self._commands.put(_WorkerCommand("close", (), future))
+            self._notify_worker()
             future.result()
             thread.join()
             if self._worker_thread is thread:
@@ -237,16 +252,22 @@ class McpToolCaller:
         with self._worker_lock:
             self._start_worker_locked()
             self._commands.put(_WorkerCommand(operation, arguments, future))
+        self._notify_worker()
         return future.result()
 
     async def _worker(self) -> None:
         connections: dict[str, _Connection] = {}
+        wakeup = asyncio.Event()
+        with self._notify_lock:
+            self._worker_loop = asyncio.get_running_loop()
+            self._worker_wakeup = wakeup
         try:
             while True:
+                wakeup.clear()
                 try:
                     command = self._commands.get_nowait()
                 except Empty:
-                    await asyncio.sleep(0.01)
+                    await wakeup.wait()
                     continue
                 try:
                     if command.operation == "close":
@@ -273,6 +294,9 @@ class McpToolCaller:
                 else:
                     command.future.set_result(result)
         finally:
+            with self._notify_lock:
+                self._worker_loop = None
+                self._worker_wakeup = None
             for connection in reversed(connections.values()):
                 if connection.stack is not None:
                     try:
@@ -566,6 +590,8 @@ class McpToolCaller:
                     parameters=_clean_schema(schema.get("inputSchema", {})),
                 )
             )
+        if not declarations:
+            return []
         return [gt.Tool(function_declarations=declarations)]
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> str:
@@ -638,25 +664,152 @@ def _result_to_text(result: Any) -> str:
     return json.dumps(result_data, default=str)
 
 
-def _clean_schema(schema: Any) -> Any:
+_SUPPORTED_SCHEMA_KEYS = {
+    "type",
+    "description",
+    "properties",
+    "required",
+    "items",
+    "enum",
+}
+
+
+def _resolve_local_ref(
+    schema: dict[str, Any],
+    defs: Mapping[str, Any],
+    seen_refs: frozenset[str],
+) -> tuple[dict[str, Any], frozenset[str], bool] | None:
+    ref = schema.get("$ref")
+    if not isinstance(ref, str):
+        return None
+    for prefix in ("#/$defs/", "#/definitions/"):
+        if not ref.startswith(prefix):
+            continue
+        target = defs.get(ref[len(prefix) :])
+        if not isinstance(target, dict):
+            return None
+        if ref in seen_refs:
+            fallback: dict[str, Any] = {}
+            if isinstance(target.get("type"), str):
+                fallback["type"] = target["type"]
+            if isinstance(schema.get("description"), str):
+                fallback["description"] = schema["description"]
+            return fallback, seen_refs, True
+        merged = {
+            **target,
+            **{key: value for key, value in schema.items() if key != "$ref"},
+        }
+        return merged, seen_refs | {ref}, False
+    return None
+
+
+def _unwrap_composite_schema(schema: dict[str, Any]) -> dict[str, Any] | None:
+    all_of = schema.get("allOf")
+    if isinstance(all_of, list) and len(all_of) == 1 and isinstance(all_of[0], dict):
+        return {
+            **all_of[0],
+            **{key: value for key, value in schema.items() if key != "allOf"},
+        }
+    for union_key in ("anyOf", "oneOf"):
+        variants = schema.get(union_key)
+        if not isinstance(variants, list):
+            continue
+        non_null = [
+            variant
+            for variant in variants
+            if not (isinstance(variant, dict) and variant.get("type") == "null")
+        ]
+        if len(non_null) == 1 and isinstance(non_null[0], dict):
+            return {
+                **non_null[0],
+                **{key: value for key, value in schema.items() if key != union_key},
+            }
+    return None
+
+
+def _clean_schema(
+    schema: Any,
+    *,
+    _defs: Mapping[str, Any] | None = None,
+    _seen_refs: frozenset[str] = frozenset(),
+) -> Any:
     """Remove JSON Schema fields unsupported by LLM function declarations."""
-    supported_keys = {
-        "type",
-        "description",
-        "properties",
-        "required",
-        "items",
-        "enum",
-    }
     if not isinstance(schema, dict):
         return schema
-    cleaned = {key: value for key, value in schema.items() if key in supported_keys}
+
+    defs = dict(_defs or {})
+    for defs_key in ("$defs", "definitions"):
+        extra_defs = schema.get(defs_key)
+        if isinstance(extra_defs, Mapping):
+            defs.update(extra_defs)
+
+    resolved = _resolve_local_ref(schema, defs, _seen_refs)
+    if resolved is not None:
+        target, next_refs, is_cycle = resolved
+        if is_cycle:
+            return target
+        return _clean_schema(target, _defs=defs, _seen_refs=next_refs)
+
+    unwrapped = _unwrap_composite_schema(schema)
+    if unwrapped is not None:
+        return _clean_schema(unwrapped, _defs=defs, _seen_refs=_seen_refs)
+
+    cleaned = {
+        key: value for key, value in schema.items() if key in _SUPPORTED_SCHEMA_KEYS
+    }
+    raw_type = cleaned.get("type")
+    if isinstance(raw_type, list):
+        non_null_types = [item for item in raw_type if item != "null"]
+        if len(non_null_types) == 1 and isinstance(non_null_types[0], str):
+            cleaned["type"] = non_null_types[0]
+        else:
+            cleaned.pop("type", None)
+    elif "type" in cleaned and not isinstance(raw_type, str):
+        cleaned.pop("type", None)
+
+    if "enum" in cleaned:
+        raw_enum = cleaned["enum"]
+        non_null_enum = (
+            [item for item in raw_enum if item is not None]
+            if isinstance(raw_enum, list)
+            else []
+        )
+        if non_null_enum and all(isinstance(item, str) for item in non_null_enum):
+            cleaned["enum"] = non_null_enum
+        else:
+            cleaned.pop("enum", None)
+
+    if "required" in cleaned:
+        raw_required = cleaned["required"]
+        if not (
+            isinstance(raw_required, list)
+            and all(isinstance(item, str) for item in raw_required)
+        ):
+            cleaned.pop("required", None)
+
     if "properties" in cleaned:
-        cleaned["properties"] = {
-            key: _clean_schema(value) for key, value in cleaned["properties"].items()
-        }
+        raw_props = cleaned["properties"]
+        if isinstance(raw_props, Mapping):
+            cleaned["properties"] = {
+                key: _clean_schema(
+                    dict(value) if isinstance(value, Mapping) else value,
+                    _defs=defs,
+                    _seen_refs=_seen_refs,
+                )
+                for key, value in raw_props.items()
+                if isinstance(key, str) and isinstance(value, Mapping)
+            }
+        else:
+            cleaned.pop("properties", None)
+
     if "items" in cleaned:
-        cleaned["items"] = _clean_schema(cleaned["items"])
+        raw_items = cleaned["items"]
+        if isinstance(raw_items, Mapping):
+            cleaned["items"] = _clean_schema(
+                dict(raw_items), _defs=defs, _seen_refs=_seen_refs
+            )
+        else:
+            cleaned.pop("items", None)
     return cleaned
 
 
@@ -725,6 +878,16 @@ def _matches_any(name: str, patterns: set[str]) -> bool:
 
 
 _default_caller: McpToolCaller | None = None
+
+
+def has_configured_default_caller() -> bool:
+    """Return whether default MCP environment URLs or singleton are configured."""
+    if _default_caller is not None:
+        return True
+    return bool(
+        os.getenv("BRRRAGENT_MCP_URLS", "").strip()
+        or os.getenv("BRRRAGENT_MCP_URL", "").strip()
+    )
 
 
 def get_default_caller() -> McpToolCaller:

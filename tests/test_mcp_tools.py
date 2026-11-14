@@ -58,6 +58,104 @@ def test_clean_schema_removes_unsupported_keys_recursively():
     }
 
 
+def test_clean_schema_resolves_defs_nullable_unions_and_cycles():
+    schema = {
+        "$defs": {
+            "Mode": {"enum": ["fast", "deep"], "title": "Mode", "type": "string"},
+            "Filter": {
+                "type": "object",
+                "properties": {
+                    "tag": {"type": "string"},
+                    "limit": {
+                        "anyOf": [{"type": "integer", "minimum": 1}, {"type": "null"}],
+                        "default": None,
+                    },
+                },
+                "required": ["tag"],
+            },
+            "Node": {
+                "type": "object",
+                "properties": {
+                    "label": {"type": "string"},
+                    "next": {
+                        "anyOf": [{"$ref": "#/$defs/Node"}, {"type": "null"}],
+                        "description": "Child node",
+                    },
+                },
+            },
+        },
+        "type": "object",
+        "properties": {
+            "mode": {
+                "allOf": [{"$ref": "#/$defs/Mode"}],
+                "description": "Search mode",
+            },
+            "cursor": {
+                "anyOf": [{"type": "string"}, {"type": "null"}],
+                "description": "Pagination cursor",
+            },
+            "tags": {
+                "oneOf": [
+                    {"type": "array", "items": {"type": "string", "minLength": 1}},
+                    {"type": "null"},
+                ]
+            },
+            "count": {"type": ["integer", "null"], "description": "Max count"},
+            "level": {"type": ["string", "null"], "enum": ["low", "high", None]},
+            "priority": {"type": "integer", "enum": [1, 2]},
+            "tuple_pair": {
+                "type": "array",
+                "items": [{"type": "string"}, {"type": "integer"}],
+            },
+            "closed_items": {"type": "array", "items": False},
+            "mixed": {"type": ["string", "integer"]},
+            "filter": {"anyOf": [{"$ref": "#/$defs/Filter"}, {"type": "null"}]},
+            "node": {"$ref": "#/$defs/Node"},
+        },
+    }
+
+    cleaned = _clean_schema(schema)
+    assert cleaned == {
+        "type": "object",
+        "properties": {
+            "mode": {
+                "type": "string",
+                "enum": ["fast", "deep"],
+                "description": "Search mode",
+            },
+            "cursor": {"type": "string", "description": "Pagination cursor"},
+            "tags": {"type": "array", "items": {"type": "string"}},
+            "count": {"type": "integer", "description": "Max count"},
+            "level": {"type": "string", "enum": ["low", "high"]},
+            "priority": {"type": "integer"},
+            "tuple_pair": {"type": "array"},
+            "closed_items": {"type": "array"},
+            "mixed": {},
+            "filter": {
+                "type": "object",
+                "properties": {
+                    "tag": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+                "required": ["tag"],
+            },
+            "node": {
+                "type": "object",
+                "properties": {
+                    "label": {"type": "string"},
+                    "next": {"type": "object", "description": "Child node"},
+                },
+            },
+        },
+    }
+
+    gt = pytest.importorskip("google.genai.types")
+    decl = gt.FunctionDeclaration(
+        name="search", description="Search", parameters=cleaned
+    )
+    assert decl.name == "search"
+
+
 class FakeMcpToolCaller(McpToolCaller):
     def __init__(self, responses, **kwargs):
         super().__init__(
@@ -147,6 +245,13 @@ def test_empty_allowed_tools_skips_discovery():
     caller = FakeMcpToolCaller([], allowed_tools=set())
 
     assert caller.get_filtered_schemas() == []
+
+
+def test_get_genai_tools_returns_empty_list_when_no_tools_allowed():
+    pytest.importorskip("google.genai.types")
+    caller = FakeMcpToolCaller([], allowed_tools=set())
+
+    assert caller.get_genai_tools() == []
 
 
 def test_get_openai_tools_filters_allowed_schemas():
@@ -770,3 +875,16 @@ def test_transport_cancellation_resolves_request_and_keeps_worker_alive(caplog):
         call_future.result()
     assert close_future.result() is None
     assert "private-token" not in caplog.text
+
+
+def test_worker_wakes_on_commands_without_polling_sleep(monkeypatch):
+    async def fail_sleep(_delay):
+        raise AssertionError("MCP worker must not poll with asyncio.sleep")
+
+    monkeypatch.setattr(mcp_tools.asyncio, "sleep", fail_sleep)
+    responses = [
+        {"result": {"tools": [{"name": "lookup", "inputSchema": {"type": "object"}}]}},
+        {"result": {"content": [{"type": "text", "text": "found"}]}},
+    ]
+    with FakeMcpToolCaller(responses) as caller:
+        assert caller.call_tool("lookup", {}) == "found"

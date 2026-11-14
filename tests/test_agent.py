@@ -375,3 +375,153 @@ def test_run_agent_requires_api_key_when_no_pool(monkeypatch):
             model="openai/gpt-5.4",
             mcp=DummyMcp(),
         )
+
+
+def test_run_agent_without_mcp_or_env_uses_noop_caller(monkeypatch):
+    from brrragent import mcp_tools
+
+    observed = {}
+
+    def fake_codex_agent(**kwargs):
+        mcp = kwargs["mcp"]
+        observed["openai_tools"] = mcp.get_openai_tools()
+        observed["genai_tools"] = mcp.get_genai_tools()
+        observed["call_result"] = mcp.call_tool("missing", {"q": "x"})
+        return "ok"
+
+    monkeypatch.delenv("BRRRAGENT_MCP_URL", raising=False)
+    monkeypatch.delenv("BRRRAGENT_MCP_URLS", raising=False)
+    monkeypatch.setattr(mcp_tools, "_default_caller", None)
+    monkeypatch.setattr("brrragent.codex_oauth.run_codex_oauth_agent", fake_codex_agent)
+
+    assert (
+        agent.run_agent(
+            system_prompt="system",
+            user_prompt="user",
+            model="codex/gpt-5.4",
+        )
+        == "ok"
+    )
+    assert observed == {
+        "openai_tools": [],
+        "genai_tools": [],
+        "call_result": "[Tool error: unknown MCP tool 'missing']",
+    }
+
+
+def test_run_agent_uses_default_caller_when_mcp_env_set(monkeypatch):
+    from brrragent import mcp_tools
+
+    sentinel = DummyMcp()
+    observed = {}
+
+    def fake_codex_agent(**kwargs):
+        observed["mcp"] = kwargs["mcp"]
+        return "ok"
+
+    monkeypatch.setenv("BRRRAGENT_MCP_URL", "https://mcp.example.test")
+    monkeypatch.setattr(mcp_tools, "_default_caller", None)
+    monkeypatch.setattr(mcp_tools, "get_default_caller", lambda: sentinel)
+    monkeypatch.setattr("brrragent.codex_oauth.run_codex_oauth_agent", fake_codex_agent)
+
+    assert (
+        agent.run_agent(
+            system_prompt="system",
+            user_prompt="user",
+            model="codex/gpt-5.4",
+        )
+        == "ok"
+    )
+    assert observed["mcp"] is sentinel
+
+
+def test_resolve_native_provider_reads_zai_base_url_at_call_time(monkeypatch):
+    monkeypatch.setenv("ZAI_API_KEY", "zai-key")
+    monkeypatch.delenv("ZAI_BASE_URL", raising=False)
+    assert agent._resolve_native_provider("z-ai/glm-5") == (
+        "https://api.z.ai/api/coding/paas/v4",
+        "zai-key",
+        "z-ai",
+        "glm-5",
+    )
+
+    monkeypatch.setenv("ZAI_BASE_URL", "   ")
+    assert agent._resolve_native_provider("z-ai/glm-5") == (
+        "https://api.z.ai/api/coding/paas/v4",
+        "zai-key",
+        "z-ai",
+        "glm-5",
+    )
+
+    monkeypatch.setenv("ZAI_BASE_URL", "https://custom.z.ai/v4")
+    assert agent._resolve_native_provider("z-ai/glm-5") == (
+        "https://custom.z.ai/v4",
+        "zai-key",
+        "z-ai",
+        "glm-5",
+    )
+
+
+def test_run_agent_forwards_extra_tools_to_gemini_direct(monkeypatch):
+    calls = []
+    extra = [{"type": "function", "function": {"name": "local_lookup"}}]
+
+    def fake_gemini_agent(**kwargs):
+        calls.append(kwargs)
+        return "ok"
+
+    monkeypatch.setattr("brrragent.gemini.run_gemini_agent", fake_gemini_agent)
+
+    assert (
+        agent.run_agent(
+            system_prompt="system",
+            user_prompt="user",
+            model="google/gemini-3.1-pro-preview",
+            gemini_key_pool=KeyPool(["gemini-key"], name="gemini"),
+            mcp=DummyMcp(),
+            extra_tools=extra,
+        )
+        == "ok"
+    )
+    assert calls[0]["extra_tools"] is extra
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"max_retries": 0}, "max_retries"),
+        ({"max_retries": -1}, "max_retries"),
+        ({"max_retries": False}, "max_retries"),
+        ({"max_turns": -1}, "max_turns"),
+        ({"max_turns": True}, "max_turns"),
+    ],
+)
+def test_run_agent_rejects_invalid_turn_and_retry_budgets(kwargs, match):
+    with pytest.raises(ValueError, match=match):
+        agent.run_agent(
+            system_prompt="system",
+            user_prompt="user",
+            model="codex/gpt-5.4",
+            mcp=DummyMcp(),
+            **kwargs,
+        )
+
+
+def test_public_api_docs_and_py_typed_marker():
+    import re
+    from pathlib import Path
+
+    import brrragent
+
+    repo_root = Path(__file__).resolve().parents[1]
+    assert (Path(brrragent.__file__).resolve().parent / "py.typed").is_file()
+
+    readme = (repo_root / "README.md").read_text(encoding="utf-8")
+    match = re.search(
+        r"## Public API\s+```python\s+from brrragent import \((.*?)\)\s+```",
+        readme,
+        re.DOTALL,
+    )
+    assert match is not None
+    documented = {item.strip() for item in match.group(1).split(",") if item.strip()}
+    assert documented == set(brrragent.__all__)

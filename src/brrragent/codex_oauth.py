@@ -33,14 +33,9 @@ DEFAULT_AUTH_PATH = "~/.cache/brrragent/codex-auth.json"
 DEFAULT_CODEX_HOME = "~/.cache/brrragent/codex-home"
 DEFAULT_PROFILE_ROOT = "~/.cache/brrragent/profiles"
 PROFILE_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
-_RETRYABLE_MARKERS = (
-    "429",
-    "500",
-    "502",
-    "503",
-    "504",
-    "timeout",
-    "temporarily unavailable",
+_RETRYABLE_TEXT_RE = re.compile(
+    r"\b(?:429|500|502|503|504|timeout|temporarily unavailable)\b",
+    re.IGNORECASE,
 )
 _RETRYABLE_STREAM_CODES = (
     "server_error",
@@ -563,7 +558,7 @@ def _stream_codex_response(
                     final_response = response_obj
                     response_id = response_obj.get("id") or response_id
                     if response_obj.get("output"):
-                        output_items = response_obj["output"]
+                        output_items = list(response_obj["output"])
 
                 item = event.get("item")
                 if item and event_type == "response.output_item.done":
@@ -641,8 +636,7 @@ def _is_transient_error(err: Exception) -> bool:
         return True
     if isinstance(err, error.URLError) and isinstance(err.reason, TimeoutError):
         return True
-    err_str = str(err).lower()
-    return any(marker in err_str for marker in _RETRYABLE_MARKERS)
+    return bool(_RETRYABLE_TEXT_RE.search(str(err)))
 
 
 def run_codex_oauth_agent(
@@ -664,6 +658,10 @@ def run_codex_oauth_agent(
 ) -> str:
     """Run agent against ChatGPT/Codex Responses using managed OAuth."""
     del temperature, max_tokens
+    if isinstance(max_turns, bool) or max_turns < 0:
+        raise ValueError("max_turns must be at least 0")
+    if isinstance(max_retries, bool) or max_retries < 1:
+        raise ValueError("max_retries must be at least 1")
 
     access_token, account_id = _get_codex_access_token()
     headers = _codex_headers(
@@ -722,8 +720,9 @@ def run_codex_oauth_agent(
                 time.sleep(min(2**attempt, 30))
         else:
             raise ValueError(
-                f"Codex OAuth failed after {max_retries} retries: {last_err}"
-            )
+                f"Codex OAuth failed after {max_retries} retries: "
+                f"{safe_error_summary(last_err)}"
+            ) from None
 
         if on_usage:
             on_usage(result["usage"])
@@ -806,5 +805,6 @@ def run_codex_oauth_agent(
             time.sleep(min(2**attempt, 30))
 
     raise ValueError(
-        f"Codex OAuth final synthesis failed after {max_retries} retries: {last_err}"
-    )
+        f"Codex OAuth final synthesis failed after {max_retries} retries: "
+        f"{safe_error_summary(last_err)}"
+    ) from None

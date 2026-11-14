@@ -133,3 +133,80 @@ def test_generate_content_404_is_not_retried_or_evicted(backend, error_kind):
 
     assert create.call_count == 1
     assert pool.active_count == 1
+
+
+def test_codex_transient_classifier_uses_word_boundaries():
+    from urllib.error import URLError
+
+    from brrragent import codex_oauth
+
+    assert not codex_oauth._is_transient_error(
+        URLError("connection refused to 127.0.0.1:5000")
+    )
+    assert not codex_oauth._is_transient_error(RuntimeError("error code 4290"))
+    assert codex_oauth._is_transient_error(RuntimeError("503 temporarily unavailable"))
+
+
+@pytest.mark.parametrize(
+    "backend", ["gemini", "openrouter", "openai_chat", "openai_responses", "codex"]
+)
+def test_backends_reject_non_positive_max_retries(backend):
+    from brrragent import codex_oauth
+
+    client = SimpleNamespace(
+        models=SimpleNamespace(generate_content=Mock()),
+        chat=SimpleNamespace(completions=SimpleNamespace(create=Mock())),
+        responses=SimpleNamespace(create=Mock()),
+    )
+
+    with pytest.raises(ValueError, match="max_retries"):
+        if backend == "gemini":
+            gemini._call_with_retry(
+                client=client, model="m", contents=[], config=None, max_retries=0
+            )
+        elif backend == "openrouter":
+            openrouter._call_with_retry(
+                client=client,
+                model="m",
+                messages=[],
+                tools=[],
+                temperature=0,
+                max_tokens=1,
+                max_retries=0,
+                base_url="https://example.test/v1",
+            )
+        elif backend == "openai_chat":
+            openai_direct._call_with_retry(
+                client=client,
+                model="m",
+                messages=[],
+                tools=[],
+                temperature=0,
+                max_tokens=1,
+                max_retries=0,
+            )
+        elif backend == "openai_responses":
+            openai_direct._call_responses_with_retry(
+                client=client,
+                model="m",
+                input_items=[],
+                instructions=None,
+                tools=[],
+                temperature=0,
+                max_tokens=1,
+                max_retries=0,
+            )
+        else:
+            codex_oauth.run_codex_oauth_agent(
+                system_prompt="s",
+                user_prompt="u",
+                model="codex/gpt-5.4",
+                mcp=SimpleNamespace(get_openai_tools=lambda: []),
+                extra_tools=None,
+                max_turns=1,
+                temperature=0,
+                max_tokens=1,
+                max_retries=0,
+                on_tool_call=None,
+                response_schema=None,
+            )
