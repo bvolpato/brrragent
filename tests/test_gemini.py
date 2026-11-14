@@ -408,3 +408,104 @@ def test_gemini_agent_rotates_key_and_retries_429_without_sleep(monkeypatch):
         "first-fake-key",
         "second-fake-key",
     ]
+
+
+def test_gemini_agent_merges_extra_tools_with_mcp_declarations(monkeypatch):
+    response = _response(FakePart(text="done"))
+    _, calls = _install_fake_google_sdk(
+        monkeypatch, lambda _key, _call_number, _kwargs: response
+    )
+    sys.modules["google.genai.types"].FunctionDeclaration = lambda **kwargs: (
+        SimpleNamespace(**kwargs)
+    )
+    sys.modules["google.genai.types"].Tool = lambda *, function_declarations: (
+        SimpleNamespace(function_declarations=function_declarations)
+    )
+
+    mcp = FakeMcp()
+    mcp.tools = [
+        SimpleNamespace(function_declarations=[SimpleNamespace(name="mcp_lookup")])
+    ]
+    extra_tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "local_tool",
+                "description": "Local helper",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "cursor": {
+                            "anyOf": [{"type": "string"}, {"type": "null"}],
+                        }
+                    },
+                },
+            },
+        }
+    ]
+
+    result = gemini.run_gemini_agent(
+        system_prompt="system",
+        user_prompt="question",
+        model="gemini-test",
+        api_key="fake-key",
+        mcp=mcp,
+        extra_tools=extra_tools,
+        max_turns=1,
+        temperature=0,
+        max_tokens=100,
+        max_retries=1,
+        on_tool_call=None,
+        response_schema=None,
+    )
+
+    assert result == "done"
+    configured_tools = calls[0]["config"].tools
+    assert len(configured_tools) == 1
+    decls = configured_tools[0].function_declarations
+    assert [decl.name for decl in decls] == ["mcp_lookup", "local_tool"]
+    assert decls[1].parameters == {
+        "type": "object",
+        "properties": {"cursor": {"type": "string"}},
+    }
+
+
+def test_gemini_agent_rejects_non_mapping_tool_arguments(monkeypatch):
+    from brrragent._tool_calls import INVALID_TOOL_ARGUMENTS
+
+    responses = iter(
+        [
+            _response(
+                FakePart(
+                    function_call=SimpleNamespace(name="lookup", args=["not-a-dict"])
+                )
+            ),
+            _response(FakePart(text="recovered")),
+        ]
+    )
+    _, calls = _install_fake_google_sdk(
+        monkeypatch, lambda _key, _call_number, _kwargs: next(responses)
+    )
+    mcp = FakeMcp()
+    events = []
+
+    result = gemini.run_gemini_agent(
+        system_prompt="system",
+        user_prompt="question",
+        model="gemini-test",
+        api_key="fake-key",
+        mcp=mcp,
+        max_turns=2,
+        temperature=0,
+        max_tokens=100,
+        max_retries=1,
+        on_tool_call=lambda name, args: events.append((name, args)),
+        response_schema=None,
+    )
+
+    assert result == "recovered"
+    assert mcp.calls == []
+    assert events == []
+    assert calls[1]["contents"][-1].parts[0].function_response.response == {
+        "result": INVALID_TOOL_ARGUMENTS
+    }

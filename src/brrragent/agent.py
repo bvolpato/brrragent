@@ -11,6 +11,7 @@ Routing logic:
   - model starts with "minimax/" + MINIMAX_API_KEY → MiniMax native
   - model starts with "openlux/" + OPENLUX_API_KEY → OpenLux native
   - legacy "yunwu/" models use the same OpenLux native route
+  - model starts with "z-ai/" + ZAI_API_KEY → Z.AI native
   - model starts with "codex/" → Codex OAuth
   - model starts with "openai/" + BRRRAGENT_OPENAI_BACKEND=codex_oauth → Codex OAuth
   - model starts with "openai/" + OpenAI keys available → OpenAI direct
@@ -62,11 +63,22 @@ NATIVE_PROVIDERS: dict[str, tuple[str, str]] = {
     "minimax/": ("https://api.minimax.io/v1", "MINIMAX_API_KEY"),
     "openlux/": ("https://api.openlux.ai/v1", "OPENLUX_API_KEY"),
     "yunwu/": ("https://api.openlux.ai/v1", "OPENLUX_API_KEY"),
-    "z-ai/": (
-        os.environ.get("ZAI_BASE_URL", "https://api.z.ai/api/coding/paas/v4"),
-        "ZAI_API_KEY",
-    ),
+    "z-ai/": ("https://api.z.ai/api/coding/paas/v4", "ZAI_API_KEY"),
 }
+
+
+class _NoopMcpCaller:
+    """Fallback tool caller used when no MCP server is configured."""
+
+    def get_openai_tools(self) -> list[dict]:
+        return []
+
+    def get_genai_tools(self) -> list:
+        return []
+
+    def call_tool(self, name: str, arguments: dict) -> str:
+        del arguments
+        return f"[Tool error: unknown MCP tool {name!r}]"
 
 
 def _is_google_model(model: str) -> bool:
@@ -126,6 +138,8 @@ def _resolve_native_provider(model: str) -> tuple[str, str, str, str] | None:
         if model.startswith(prefix):
             api_key = _native_provider_api_key(env_var)
             if api_key:
+                if prefix == "z-ai/":
+                    base_url = os.environ.get("ZAI_BASE_URL", "").strip() or base_url
                 provider_name = (
                     "openlux"
                     if prefix in {"openlux/", "yunwu/"}
@@ -204,7 +218,8 @@ def run_agent(
         openai_key_pool: KeyPool for direct OpenAI keys (preferred over env var).
         openrouter_key_pool: KeyPool for OpenRouter keys (preferred over env var).
         base_url: API base URL (only used for OpenRouter path).
-        mcp: McpToolCaller instance. Defaults to the shared singleton.
+        mcp: McpToolCaller instance. Uses the default env-configured caller when
+            BRRRAGENT_MCP_URL(S) is set; otherwise runs without MCP tools.
         extra_tools: Additional tool definitions (OpenAI format).
         max_turns: Maximum number of tool-calling rounds.
         temperature: Sampling temperature.
@@ -225,14 +240,26 @@ def run_agent(
         ValueError: If all retries are exhausted without a response.
         RateLimitExhausted: If all keys in a pool hit 429.
     """
+    if isinstance(max_turns, bool) or max_turns < 0:
+        raise ValueError("max_turns must be at least 0")
+    if isinstance(max_retries, bool) or max_retries < 1:
+        raise ValueError("max_retries must be at least 1")
+
     image_inputs = tuple(images or ())
     if any(not isinstance(image, ImageInput) for image in image_inputs):
         raise TypeError("images must contain ImageInput values")
 
     if mcp is None:
-        from brrragent.mcp_tools import get_default_caller
+        from brrragent.mcp_tools import (
+            get_default_caller,
+            has_configured_default_caller,
+        )
 
-        mcp = get_default_caller()
+        mcp = (
+            get_default_caller()
+            if has_configured_default_caller()
+            else _NoopMcpCaller()
+        )
 
     # Build pools from env vars if not explicitly provided
     if gemini_key_pool is None:
@@ -278,6 +305,7 @@ def run_agent(
             model=bare_model,
             key_pool=gemini_key_pool,
             mcp=mcp,
+            extra_tools=extra_tools,
             max_turns=max_turns,
             temperature=temperature,
             max_tokens=max_tokens,

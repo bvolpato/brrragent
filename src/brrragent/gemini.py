@@ -10,18 +10,48 @@ pool evicts it and the agent retries with a fresh key.
 
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 from brrragent._errors import (
     is_rate_limit_error,
     is_transient_error,
     safe_error_summary,
 )
+from brrragent._tool_calls import INVALID_TOOL_ARGUMENTS
 from brrragent.images import ImageInput, _decode_data_url
 from brrragent.keys import KeyPool
 from brrragent.prompt_cache import AgentUsage, PromptCacheConfig, gemini_usage
 
 logger = logging.getLogger(__name__)
+
+
+def _extra_genai_declarations(extra_tools: list[dict], gt) -> list:
+    from brrragent.mcp_tools import _clean_schema
+
+    declarations = []
+    for tool in extra_tools:
+        if not isinstance(tool, Mapping):
+            continue
+        spec = (
+            tool.get("function")
+            if tool.get("type") == "function"
+            and isinstance(tool.get("function"), Mapping)
+            else tool
+        )
+        name = spec.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        raw_params = spec.get("parameters")
+        declarations.append(
+            gt.FunctionDeclaration(
+                name=name,
+                description=str(spec.get("description") or "")[:500],
+                parameters=_clean_schema(
+                    dict(raw_params) if isinstance(raw_params, Mapping) else {}
+                ),
+            )
+        )
+    return declarations
 
 
 def run_gemini_agent(
@@ -32,6 +62,7 @@ def run_gemini_agent(
     api_key: str | None = None,
     key_pool: KeyPool | None = None,
     mcp,
+    extra_tools: list[dict] | None = None,
     max_turns: int,
     temperature: float,
     max_tokens: int,
@@ -48,6 +79,11 @@ def run_gemini_agent(
       1. key_pool — acquires from pool, evicts on 429, retries with fresh key
       2. api_key — single explicit key (legacy)
     """
+    if isinstance(max_turns, bool) or max_turns < 0:
+        raise ValueError("max_turns must be at least 0")
+    if isinstance(max_retries, bool) or max_retries < 1:
+        raise ValueError("max_retries must be at least 1")
+
     try:
         from google import genai
         from google.genai import types as gt
@@ -62,6 +98,24 @@ def run_gemini_agent(
     selected_key = api_key or key_pool.acquire()
     client = genai.Client(api_key=selected_key)
     tools = mcp.get_genai_tools()
+    if extra_tools:
+        extra_declarations = _extra_genai_declarations(extra_tools, gt)
+        if extra_declarations:
+            tools = list(tools or [])
+            if (
+                len(tools) == 1
+                and getattr(tools[0], "function_declarations", None) is not None
+            ):
+                tools = [
+                    gt.Tool(
+                        function_declarations=[
+                            *tools[0].function_declarations,
+                            *extra_declarations,
+                        ]
+                    )
+                ]
+            else:
+                tools.append(gt.Tool(function_declarations=extra_declarations))
 
     image_parts = []
     for image in images:
@@ -147,13 +201,18 @@ def run_gemini_agent(
 
         tool_result_parts = []
         for fc in fn_calls:
-            fn_name = fc.function_call.name
-            fn_args = dict(fc.function_call.args or {})
-            logger.info("[agent] Tool: %s(%s)", fn_name, list(fn_args.keys()))
-            if on_tool_call:
-                on_tool_call(fn_name, fn_args)
+            fn_name = fc.function_call.name or ""
+            raw_args = fc.function_call.args
+            if raw_args is not None and not isinstance(raw_args, Mapping):
+                logger.warning("[agent] Invalid tool arguments for %s", fn_name)
+                result_text = INVALID_TOOL_ARGUMENTS
+            else:
+                fn_args = dict(raw_args or {})
+                logger.info("[agent] Tool: %s(%s)", fn_name, list(fn_args.keys()))
+                if on_tool_call:
+                    on_tool_call(fn_name, fn_args)
 
-            result_text = mcp.call_tool(fn_name, fn_args)
+                result_text = mcp.call_tool(fn_name, fn_args)
             tool_result_parts.append(
                 gt.Part(
                     function_response=gt.FunctionResponse(
@@ -223,6 +282,9 @@ def _call_with_retry(
 
     Without a key_pool, 429s are retried with backoff like any transient error.
     """
+    if isinstance(max_retries, bool) or max_retries < 1:
+        raise ValueError("max_retries must be at least 1")
+
     last_err = None
 
     for attempt in range(1, max_retries + 1):

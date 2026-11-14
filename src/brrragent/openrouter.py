@@ -70,6 +70,10 @@ def run_openrouter_agent(
     """
     from openai import OpenAI
 
+    if isinstance(max_turns, bool) or max_turns < 0:
+        raise ValueError("max_turns must be at least 0")
+    if isinstance(max_retries, bool) or max_retries < 1:
+        raise ValueError("max_retries must be at least 1")
     if key_pool is None and api_key is None:
         raise ValueError("Either api_key or key_pool must be provided")
 
@@ -228,6 +232,8 @@ def _call_with_retry(
     """
     from openai import OpenAI
 
+    if isinstance(max_retries, bool) or max_retries < 1:
+        raise ValueError("max_retries must be at least 1")
     last_err = None
 
     for attempt in range(1, max_retries + 1):
