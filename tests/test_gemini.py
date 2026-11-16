@@ -1,4 +1,6 @@
+import json
 import sys
+from importlib.metadata import version
 from types import ModuleType, SimpleNamespace
 
 from brrragent import ImageInput, gemini
@@ -76,7 +78,8 @@ def _install_fake_google_sdk(monkeypatch, generate):
     calls = []
 
     class FakeClient:
-        def __init__(self, *, api_key):
+        def __init__(self, *, api_key, http_options=None):
+            assert http_options.api_version == "v1beta"
             client_keys.append(api_key)
             self.api_key = api_key
             self.models = SimpleNamespace(generate_content=self.generate_content)
@@ -96,6 +99,7 @@ def _install_fake_google_sdk(monkeypatch, generate):
     types_module.Part = FakePart
     types_module.FunctionResponse = FakeFunctionResponse
     types_module.GenerateContentConfig = FakeGenerateContentConfig
+    types_module.HttpOptions = SimpleNamespace
 
     genai_module = ModuleType("google.genai")
     genai_module.Client = FakeClient
@@ -124,6 +128,96 @@ def test_google_genai_sdk_exposes_adapter_types():
     assert config.system_instruction == "system"
     assert content.parts[0].text == "question"
     assert function_response.function_response.name == "lookup"
+
+
+def test_gemini_sdk_preserves_beta_model_tool_roundtrip(monkeypatch):
+    from google import genai
+    from google.genai import types as gt
+
+    if int(version("google-genai").split(".")[0]) >= 3:
+        import httpx2 as transport
+    else:
+        import httpx as transport
+
+    requests = []
+    responses = iter(
+        [
+            {"functionCall": {"name": "lookup", "args": {"query": "example"}}},
+            {"text": '{"answer":"done"}'},
+        ]
+    )
+
+    def handle(request):
+        requests.append(request)
+        return transport.Response(
+            200,
+            json={
+                "candidates": [
+                    {"content": {"role": "model", "parts": [next(responses)]}}
+                ]
+            },
+        )
+
+    original_client = genai.Client
+    clients = []
+
+    if "client_args" not in gt.HttpOptions.model_fields:
+        import requests as requests_transport
+
+        def legacy_request(_session, *, method, url, data, **_kwargs):
+            response = handle(transport.Request(method, url, content=data))
+            legacy_response = requests_transport.Response()
+            legacy_response.status_code = response.status_code
+            legacy_response._content = response.content
+            return legacy_response
+
+        monkeypatch.setattr(requests_transport.Session, "request", legacy_request)
+
+    def client_factory(*, api_key, http_options=None):
+        options = http_options.model_dump(exclude_none=True) if http_options else {}
+        if "client_args" in gt.HttpOptions.model_fields:
+            options["client_args"] = {"transport": transport.MockTransport(handle)}
+        client = original_client(
+            api_key=api_key, http_options=gt.HttpOptions(**options)
+        )
+        if "client_args" in gt.HttpOptions.model_fields:
+            clients.append(client)
+        return client
+
+    monkeypatch.setattr(genai, "Client", client_factory)
+    monkeypatch.delenv("GOOGLE_GENAI_API_VERSION", raising=False)
+    monkeypatch.delenv("GOOGLE_GENAI_HTTP_CLIENT", raising=False)
+    mcp = FakeMcp()
+    try:
+        result = gemini.run_gemini_agent(
+            system_prompt="system",
+            user_prompt="question",
+            model="gemini-flash-latest",
+            api_key="synthetic-key",
+            mcp=mcp,
+            max_turns=3,
+            temperature=0.2,
+            max_tokens=100,
+            max_retries=1,
+            on_tool_call=None,
+            response_schema=None,
+        )
+    finally:
+        for client in clients:
+            client.close()
+
+    assert result == '{"answer":"done"}'
+    assert mcp.calls == [("lookup", {"query": "example"})]
+    assert len(requests) == 2
+    assert all(
+        request.url.path == "/v1beta/models/gemini-flash-latest:generateContent"
+        for request in requests
+    )
+    body = json.loads(requests[1].content)
+    assert body["contents"][-1]["parts"][0]["functionResponse"] == {
+        "name": "lookup",
+        "response": {"result": "tool result"},
+    }
 
 
 def test_gemini_agent_executes_tool_then_returns_schema_response(monkeypatch):
