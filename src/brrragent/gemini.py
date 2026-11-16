@@ -96,7 +96,9 @@ def run_gemini_agent(
         raise ValueError("Either api_key or key_pool must be provided")
 
     selected_key = api_key or key_pool.acquire()
-    client = genai.Client(api_key=selected_key)
+    client = genai.Client(
+        api_key=selected_key, http_options=gt.HttpOptions(api_version="v1beta")
+    )
     tools = mcp.get_genai_tools()
     if extra_tools:
         extra_declarations = _extra_genai_declarations(extra_tools, gt)
@@ -153,7 +155,10 @@ def run_gemini_agent(
             response, new_key = response
             if new_key != selected_key:
                 selected_key = new_key
-                client = genai.Client(api_key=selected_key)
+                client = genai.Client(
+                    api_key=selected_key,
+                    http_options=gt.HttpOptions(api_version="v1beta"),
+                )
 
         if on_usage and getattr(response, "usage_metadata", None):
             on_usage(gemini_usage(response.usage_metadata))
@@ -312,8 +317,12 @@ def _call_with_retry(
                 current_key = key_pool.acquire()
 
                 from google import genai
+                from google.genai import types as gt
 
-                client = genai.Client(api_key=current_key)
+                client = genai.Client(
+                    api_key=current_key,
+                    http_options=gt.HttpOptions(api_version="v1beta"),
+                )
                 logger.info("[agent] Rotated Gemini key, retrying immediately")
                 continue
 
