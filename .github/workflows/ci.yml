@@ -149,12 +149,17 @@ jobs:
 
       - name: Install minimum dependencies
         run: |
+          # The Gemini extra requires httpx 0.28.1 through google-genai.
           uv pip install \
-            "httpx==0.27.1" \
-            "httpx2==2.5.0" \
-            "mcp==2.0.0" \
+            "httpx==0.28.1" \
+            "httpx2==2.12.0" \
+            "mcp==2.2.0" \
             "openai==2.45.0" \
-            "google-genai==1.0.0"
+            "google-genai==2.33.0" \
+            "websockets==17.4"
+
+      - name: Check minimum dependencies
+        run: uv pip check
 
       - name: Run tests with minimum dependencies
         run: uv run --no-sync pytest -q

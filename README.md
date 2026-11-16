@@ -280,10 +280,25 @@ from brrragent import (
 
 - Python 3.12 or newer
 - `httpx>=0.27.1,<1`
-- `httpx2>=2.5,<3`
-- `mcp>=2.0.0,<3`
+- `httpx2>=2.12.0,<3`
+- `mcp>=2.2.0,<3`
 - `openai>=2.45.0,<4`
-- `google-genai>=1.0.0,<3` for the `gemini` extra
+- `google-genai>=2.33.0,<4` and `websockets>=17.4,<18` for the `gemini` extra
+
+Gemini support now requires Google GenAI SDK 2.33.0 or newer so installations
+can use websockets 17.4, which fixes
+[GHSA-6m5v-9gmr-5665](https://github.com/python-websockets/websockets/security/advisories/GHSA-6m5v-9gmr-5665).
+SDK 1.x and SDK 2.0 through 2.32 are no longer supported. Applications pinned
+to those versions must upgrade before installing this Gemini extra. The extra
+also requires httpx 0.28.1 or newer through the SDK; the core package continues
+to support httpx 0.27.1. SDK 2.x and 3.x use the explicit Gemini `v1beta` API
+for the model and tool-calling contract.
+
+The core HTTPX2 and MCP minimums also increase to 2.12.0 and 2.2.0,
+respectively, to exclude known transport and MCP security vulnerabilities.
+Applications pinned below these versions must upgrade their constraints.
+MCP 2.2 also rejects cross-origin redirects and external tool-output schema
+references instead of forwarding credentials or fetching remote schemas.
 
 ## License
 
