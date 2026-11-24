@@ -494,6 +494,8 @@ def test_run_agent_forwards_extra_tools_to_gemini_direct(monkeypatch):
         ({"max_retries": False}, "max_retries"),
         ({"max_turns": -1}, "max_turns"),
         ({"max_turns": True}, "max_turns"),
+        ({"api_key": ""}, "api_key"),
+        ({"api_key": "   "}, "api_key"),
     ],
 )
 def test_run_agent_rejects_invalid_turn_and_retry_budgets(kwargs, match):

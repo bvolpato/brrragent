@@ -147,6 +147,42 @@ def test_codex_transient_classifier_uses_word_boundaries():
     assert codex_oauth._is_transient_error(RuntimeError("503 temporarily unavailable"))
 
 
+def test_transient_classifier_handles_network_timeouts_and_overloaded_statuses():
+    import http.client
+
+    import httpx
+    import httpx2
+    import openai
+
+    req = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+    req2 = httpx2.Request("POST", "https://generativelanguage.googleapis.com/v1beta")
+
+    for err in (
+        TimeoutError("timed out"),
+        http.client.RemoteDisconnected("closed"),
+        http.client.IncompleteRead(b"part"),
+        openai.APITimeoutError(request=req),
+        openai.APIConnectionError(request=req),
+        httpx.ReadTimeout("timed out", request=req),
+        httpx.ConnectError("connect failed", request=req),
+        httpx.RemoteProtocolError("peer closed", request=req),
+        httpx2.ReadTimeout("timed out", request=req2),
+        ProviderError("request timeout", status_code=408),
+        ProviderError("overloaded", status_code=529),
+    ):
+        assert is_transient_error(err), f"Expected transient: {err!r}"
+        assert not is_rate_limit_error(err)
+
+    assert not is_transient_error(httpx.LocalProtocolError("bad header"))
+    http_401 = httpx2.HTTPStatusError(
+        "secret",
+        request=req2,
+        response=httpx2.Response(401, request=req2),
+    )
+    assert not is_transient_error(http_401)
+    assert safe_error_summary(http_401) == "HTTPStatusError (HTTP 401)"
+
+
 @pytest.mark.parametrize(
     "backend", ["gemini", "openrouter", "openai_chat", "openai_responses", "codex"]
 )

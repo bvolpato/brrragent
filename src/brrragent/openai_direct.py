@@ -6,7 +6,7 @@ Handles OpenAI reasoning-effort suffixes such as ``openai/gpt-5.5:xhigh``.
 
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 from brrragent._errors import (
     is_rate_limit_error,
@@ -21,6 +21,12 @@ from brrragent.prompt_cache import AgentUsage, PromptCacheConfig, openai_usage
 logger = logging.getLogger(__name__)
 
 _REASONING_SUFFIXES = (":none", ":low", ":medium", ":high", ":xhigh")
+
+
+def _close_client(client) -> None:
+    close = getattr(client, "close", None)
+    if callable(close):
+        close()
 
 
 def parse_openai_model(model: str) -> tuple[str, str | None]:
@@ -74,13 +80,14 @@ def _build_chat_kwargs(
 def _to_responses_tool(tool: dict) -> dict:
     if tool.get("type") != "function":
         return tool
-    fn = tool.get("function", {})
+    raw_fn = tool.get("function")
+    fn = raw_fn if isinstance(raw_fn, Mapping) else tool
     return {
         "type": "function",
         "name": fn.get("name"),
-        "description": fn.get("description", ""),
-        "parameters": fn.get("parameters", {"type": "object", "properties": {}}),
-        "strict": False,
+        "description": fn.get("description") or "",
+        "parameters": fn.get("parameters") or {"type": "object", "properties": {}},
+        "strict": bool(fn.get("strict", False)) if fn is tool else False,
     }
 
 
@@ -163,7 +170,7 @@ def _should_use_responses(
 def _response_function_calls(response) -> list:
     return [
         item
-        for item in getattr(response, "output", [])
+        for item in getattr(response, "output", None) or []
         if getattr(item, "type", None) == "function_call"
     ]
 
@@ -174,10 +181,10 @@ def _response_final_text(response) -> str:
         return text
 
     parts: list[str] = []
-    for item in getattr(response, "output", []):
+    for item in getattr(response, "output", None) or []:
         if getattr(item, "type", None) != "message":
             continue
-        for content in getattr(item, "content", []) or []:
+        for content in getattr(item, "content", None) or []:
             content_type = getattr(content, "type", None)
             if content_type in {"output_text", "text"}:
                 value = getattr(content, "text", "")
@@ -210,139 +217,147 @@ def run_openai_agent(
         raise ValueError("max_turns must be at least 0")
     if isinstance(max_retries, bool) or max_retries < 1:
         raise ValueError("max_retries must be at least 1")
+    if api_key is not None and not api_key.strip():
+        raise ValueError("api_key must not be empty")
     if key_pool is None and api_key is None:
         raise ValueError("Either api_key or key_pool must be provided")
 
-    selected_key = api_key or key_pool.acquire()
+    selected_key = api_key if api_key is not None else key_pool.acquire()
     client = _new_openai_client(selected_key)
 
-    tools = mcp.get_openai_tools()
-    if extra_tools:
-        tools.extend(extra_tools)
+    try:
+        tools = list(mcp.get_openai_tools() or ())
+        if extra_tools:
+            tools.extend(extra_tools)
 
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": _chat_user_content(user_prompt, images)},
-    ]
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": _chat_user_content(user_prompt, images)},
+        ]
 
-    response_format = None
-    if response_schema:
-        response_format = {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "agent_response",
-                "strict": True,
-                "schema": response_schema,
-            },
-        }
+        response_format = None
+        if response_schema:
+            response_format = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "agent_response",
+                    "strict": True,
+                    "schema": response_schema,
+                },
+            }
 
-    if _should_use_responses(model, tools, response_schema):
-        return _run_openai_responses_agent(
-            client=client,
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            model=model,
-            tools=tools,
-            mcp=mcp,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            max_retries=max_retries,
-            max_turns=max_turns,
-            on_tool_call=on_tool_call,
-            response_schema=response_schema,
-            key_pool=key_pool,
-            selected_key=selected_key,
-            prompt_cache=prompt_cache,
-            on_usage=on_usage,
-            images=images,
-        )
-
-    for turn in range(max_turns + 1):
-        final_turn = turn == max_turns
-        if final_turn:
-            logger.warning(
-                "[agent] Reached max_turns=%d; requesting final answer without tools",
-                max_turns,
-            )
-            messages.append(
-                {
-                    "role": "user",
-                    "content": "Stop calling tools. Provide the final answer using the evidence already gathered.",
-                }
-            )
-        else:
-            bare_model, _ = parse_openai_model(model)
-            logger.info(
-                "[agent] Turn %d/%d - calling OpenAI %s",
-                turn + 1,
-                max_turns,
-                bare_model,
+        if _should_use_responses(model, tools, response_schema):
+            return _run_openai_responses_agent(
+                client=client,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                model=model,
+                tools=tools,
+                mcp=mcp,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                max_retries=max_retries,
+                max_turns=max_turns,
+                on_tool_call=on_tool_call,
+                response_schema=response_schema,
+                key_pool=key_pool,
+                selected_key=selected_key,
+                prompt_cache=prompt_cache,
+                on_usage=on_usage,
+                images=images,
             )
 
-        result = _call_with_retry(
-            client=client,
-            model=model,
-            messages=messages,
-            tools=[] if final_turn else tools,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            max_retries=max_retries,
-            response_format=response_format,
-            key_pool=key_pool,
-            current_key=selected_key,
-            prompt_cache=prompt_cache,
-        )
-
-        if isinstance(result, tuple):
-            response, new_key = result
-            if new_key != selected_key:
-                selected_key = new_key
-                client = _new_openai_client(selected_key)
-        else:
-            response = result
-
-        if on_usage and getattr(response, "usage", None):
-            on_usage(openai_usage(response.usage))
-
-        choice = response.choices[0]
-        message = choice.message
-        if final_turn:
-            return message.content or "[No final response after max tool turns]"
-        messages.append(message.model_dump(exclude_none=True))
-
-        if message.tool_calls:
-            logger.info(
-                "[agent] Turn %d: %d tool call(s)", turn + 1, len(message.tool_calls)
-            )
-
-            for tool_call in message.tool_calls:
-                fn_name = tool_call.function.name
-                result_text = execute_tool_call(
-                    mcp,
-                    fn_name,
-                    tool_call.function.arguments,
-                    on_tool_call=on_tool_call,
+        for turn in range(max_turns + 1):
+            final_turn = turn == max_turns
+            if final_turn:
+                logger.warning(
+                    "[agent] Reached max_turns=%d; requesting final answer without tools",
+                    max_turns,
                 )
                 messages.append(
                     {
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": result_text,
+                        "role": "user",
+                        "content": "Stop calling tools. Provide the final answer using the evidence already gathered.",
                     }
                 )
-        else:
-            final_text = message.content or ""
-            logger.info(
-                "[agent] Final response after %d turn(s) (%d chars)",
-                turn + 1,
-                len(final_text),
+            else:
+                bare_model, _ = parse_openai_model(model)
+                logger.info(
+                    "[agent] Turn %d/%d - calling OpenAI %s",
+                    turn + 1,
+                    max_turns,
+                    bare_model,
+                )
+
+            result = _call_with_retry(
+                client=client,
+                model=model,
+                messages=messages,
+                tools=[] if final_turn else tools,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                max_retries=max_retries,
+                response_format=response_format,
+                key_pool=key_pool,
+                current_key=selected_key,
+                prompt_cache=prompt_cache,
             )
-            return final_text
 
-        if choice.finish_reason == "stop":
-            return message.content or ""
+            if isinstance(result, tuple):
+                response, new_key, new_client = result
+                if new_client is not client:
+                    _close_client(client)
+                    client = new_client
+                selected_key = new_key
+            else:
+                response = result
 
-    return "[No final response after max tool turns]"
+            if on_usage and getattr(response, "usage", None):
+                on_usage(openai_usage(response.usage))
+
+            choices = getattr(response, "choices", None) or []
+            if not choices:
+                return "[No final response after max tool turns]"
+            choice = choices[0]
+            message = choice.message
+            if final_turn:
+                return message.content or "[No final response after max tool turns]"
+            messages.append(message.model_dump(exclude_none=True))
+
+            if message.tool_calls:
+                logger.info(
+                    "[agent] Turn %d: %d tool call(s)",
+                    turn + 1,
+                    len(message.tool_calls),
+                )
+
+                for tool_call in message.tool_calls:
+                    fn_name = tool_call.function.name
+                    result_text = execute_tool_call(
+                        mcp,
+                        fn_name,
+                        tool_call.function.arguments,
+                        on_tool_call=on_tool_call,
+                    )
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": result_text,
+                        }
+                    )
+            else:
+                final_text = message.content or ""
+                logger.info(
+                    "[agent] Final response after %d turn(s) (%d chars)",
+                    turn + 1,
+                    len(final_text),
+                )
+                return final_text
+
+        return "[No final response after max tool turns]"
+    finally:
+        _close_client(client)
 
 
 def _run_openai_responses_agent(
@@ -368,22 +383,96 @@ def _run_openai_responses_agent(
     input_items = [
         {"role": "user", "content": _responses_user_content(user_prompt, images)}
     ]
+    initial_client = client
 
-    for turn in range(max_turns):
-        bare_model, _ = parse_openai_model(model)
-        logger.info(
-            "[agent] Turn %d/%d - calling OpenAI Responses %s",
-            turn + 1,
+    try:
+        for turn in range(max_turns):
+            bare_model, _ = parse_openai_model(model)
+            logger.info(
+                "[agent] Turn %d/%d - calling OpenAI Responses %s",
+                turn + 1,
+                max_turns,
+                bare_model,
+            )
+
+            result = _call_responses_with_retry(
+                client=client,
+                model=model,
+                input_items=input_items,
+                instructions=system_prompt,
+                tools=tools,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                max_retries=max_retries,
+                response_schema=response_schema,
+                key_pool=key_pool,
+                current_key=selected_key,
+                prompt_cache=prompt_cache,
+            )
+
+            if isinstance(result, tuple):
+                response, new_key, new_client = result
+                if new_client is not client:
+                    if client is not initial_client:
+                        _close_client(client)
+                    client = new_client
+                selected_key = new_key
+            else:
+                response = result
+
+            if on_usage and getattr(response, "usage", None):
+                on_usage(openai_usage(response.usage))
+
+            function_calls = _response_function_calls(response)
+            if not function_calls:
+                final_text = _response_final_text(response)
+                logger.info(
+                    "[agent] Final response after %d turn(s) (%d chars)",
+                    turn + 1,
+                    len(final_text),
+                )
+                return final_text
+
+            logger.info(
+                "[agent] Turn %d: %d tool call(s)", turn + 1, len(function_calls)
+            )
+            # Stateless continuation needs every output item, including reasoning and phase.
+            input_items.extend(
+                item.model_dump(exclude_none=True)
+                for item in getattr(response, "output", None) or []
+            )
+            for tool_call in function_calls:
+                fn_name = tool_call.name
+                result_text = execute_tool_call(
+                    mcp,
+                    fn_name,
+                    tool_call.arguments,
+                    on_tool_call=on_tool_call,
+                )
+                input_items.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": tool_call.call_id,
+                        "output": result_text,
+                    }
+                )
+
+        logger.warning(
+            "[agent] Reached max_turns=%d without final response; requesting final answer without tools",
             max_turns,
-            bare_model,
         )
-
         result = _call_responses_with_retry(
             client=client,
             model=model,
-            input_items=input_items,
+            input_items=[
+                *input_items,
+                {
+                    "role": "user",
+                    "content": "Stop calling tools. Provide the final answer using the evidence already gathered.",
+                },
+            ],
             instructions=system_prompt,
-            tools=tools,
+            tools=[],
             temperature=temperature,
             max_tokens=max_tokens,
             max_retries=max_retries,
@@ -392,81 +481,24 @@ def _run_openai_responses_agent(
             current_key=selected_key,
             prompt_cache=prompt_cache,
         )
-
         if isinstance(result, tuple):
-            response, new_key = result
-            if new_key != selected_key:
-                selected_key = new_key
-                client = _new_openai_client(selected_key)
+            response, _new_key, new_client = result
+            if new_client is not client:
+                if client is not initial_client:
+                    _close_client(client)
+                client = new_client
         else:
             response = result
-
         if on_usage and getattr(response, "usage", None):
             on_usage(openai_usage(response.usage))
-
-        function_calls = _response_function_calls(response)
-        if not function_calls:
-            final_text = _response_final_text(response)
-            logger.info(
-                "[agent] Final response after %d turn(s) (%d chars)",
-                turn + 1,
-                len(final_text),
-            )
-            return final_text
-
-        logger.info("[agent] Turn %d: %d tool call(s)", turn + 1, len(function_calls))
-        # Stateless continuation needs every output item, including reasoning and phase.
-        input_items.extend(
-            item.model_dump(exclude_none=True) for item in response.output
+        final_text = _response_final_text(response)
+        logger.info(
+            "[agent] Final no-tool response after max_turns (%d chars)", len(final_text)
         )
-        for tool_call in function_calls:
-            fn_name = tool_call.name
-            result_text = execute_tool_call(
-                mcp,
-                fn_name,
-                tool_call.arguments,
-                on_tool_call=on_tool_call,
-            )
-            input_items.append(
-                {
-                    "type": "function_call_output",
-                    "call_id": tool_call.call_id,
-                    "output": result_text,
-                }
-            )
-
-    logger.warning(
-        "[agent] Reached max_turns=%d without final response; requesting final answer without tools",
-        max_turns,
-    )
-    result = _call_responses_with_retry(
-        client=client,
-        model=model,
-        input_items=[
-            *input_items,
-            {
-                "role": "user",
-                "content": "Stop calling tools. Provide the final answer using the evidence already gathered.",
-            },
-        ],
-        instructions=system_prompt,
-        tools=[],
-        temperature=temperature,
-        max_tokens=max_tokens,
-        max_retries=max_retries,
-        response_schema=response_schema,
-        key_pool=key_pool,
-        current_key=selected_key,
-        prompt_cache=prompt_cache,
-    )
-    response = result[0] if isinstance(result, tuple) else result
-    if on_usage and getattr(response, "usage", None):
-        on_usage(openai_usage(response.usage))
-    final_text = _response_final_text(response)
-    logger.info(
-        "[agent] Final no-tool response after max_turns (%d chars)", len(final_text)
-    )
-    return final_text or "[No final response after max tool turns]"
+        return final_text or "[No final response after max tool turns]"
+    finally:
+        if client is not initial_client:
+            _close_client(client)
 
 
 def _call_with_retry(
@@ -486,52 +518,66 @@ def _call_with_retry(
     if isinstance(max_retries, bool) or max_retries < 1:
         raise ValueError("max_retries must be at least 1")
     last_err = None
+    active_client = client
 
-    for attempt in range(1, max_retries + 1):
-        try:
-            kwargs = _build_chat_kwargs(
-                model=model,
-                messages=messages,
-                tools=tools,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                response_format=response_format,
-                prompt_cache=prompt_cache,
-            )
-            resp = client.chat.completions.create(**kwargs)
-            if key_pool:
-                return (resp, current_key)
-            return resp
-        except Exception as e:
-            last_err = e
+    try:
+        for attempt in range(1, max_retries + 1):
+            try:
+                kwargs = _build_chat_kwargs(
+                    model=model,
+                    messages=messages,
+                    tools=tools,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    response_format=response_format,
+                    prompt_cache=prompt_cache,
+                )
+                resp = active_client.chat.completions.create(**kwargs)
+                if key_pool:
+                    return (resp, current_key, active_client)
+                return resp
+            except Exception as e:
+                last_err = e
 
-            if is_rate_limit_error(e) and key_pool:
+                if is_rate_limit_error(e) and key_pool:
+                    logger.warning(
+                        "[agent] OpenAI 429 (attempt %d/%d): %s",
+                        attempt,
+                        max_retries,
+                        safe_error_summary(e),
+                    )
+                    key_pool.report_rate_limit(current_key)
+                    if attempt >= max_retries:
+                        break
+                    current_key = key_pool.acquire()
+                    new_client = _new_openai_client(current_key)
+                    if active_client is not client:
+                        _close_client(active_client)
+                    active_client = new_client
+                    logger.info("[agent] Rotated OpenAI key")
+                    continue
+
+                transient = is_transient_error(e)
                 logger.warning(
-                    "[agent] OpenAI 429 (attempt %d/%d): %s",
+                    "[agent] OpenAI call attempt %d/%d failed: %s",
                     attempt,
                     max_retries,
                     safe_error_summary(e),
                 )
-                key_pool.report_rate_limit(current_key)
-                current_key = key_pool.acquire()
-                client = _new_openai_client(current_key)
-                logger.info("[agent] Rotated OpenAI key")
-                continue
 
-            logger.warning(
-                "[agent] OpenAI call attempt %d/%d failed: %s",
-                attempt,
-                max_retries,
-                safe_error_summary(e),
-            )
+                if transient and attempt < max_retries:
+                    wait = min(2**attempt, 30)
+                    logger.info("[agent] Transient OpenAI error, retrying in %ds", wait)
+                    time.sleep(wait)
+                elif not transient:
+                    raise
+    except BaseException:
+        if active_client is not client:
+            _close_client(active_client)
+        raise
 
-            if is_transient_error(e) and attempt < max_retries:
-                wait = min(2**attempt, 30)
-                logger.info("[agent] Transient OpenAI error, retrying in %ds", wait)
-                time.sleep(wait)
-            elif not is_transient_error(e):
-                raise
-
+    if active_client is not client:
+        _close_client(active_client)
     raise ValueError(
         f"OpenAI call failed after {max_retries} retries: {safe_error_summary(last_err)}"
     ) from None
@@ -555,53 +601,67 @@ def _call_responses_with_retry(
     if isinstance(max_retries, bool) or max_retries < 1:
         raise ValueError("max_retries must be at least 1")
     last_err = None
+    active_client = client
 
-    for attempt in range(1, max_retries + 1):
-        try:
-            kwargs = _build_responses_kwargs(
-                model=model,
-                input_items=input_items,
-                instructions=instructions,
-                tools=tools,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                response_schema=response_schema,
-                prompt_cache=prompt_cache,
-            )
-            resp = client.responses.create(**kwargs)
-            if key_pool:
-                return (resp, current_key)
-            return resp
-        except Exception as e:
-            last_err = e
+    try:
+        for attempt in range(1, max_retries + 1):
+            try:
+                kwargs = _build_responses_kwargs(
+                    model=model,
+                    input_items=input_items,
+                    instructions=instructions,
+                    tools=tools,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    response_schema=response_schema,
+                    prompt_cache=prompt_cache,
+                )
+                resp = active_client.responses.create(**kwargs)
+                if key_pool:
+                    return (resp, current_key, active_client)
+                return resp
+            except Exception as e:
+                last_err = e
 
-            if is_rate_limit_error(e) and key_pool:
+                if is_rate_limit_error(e) and key_pool:
+                    logger.warning(
+                        "[agent] OpenAI 429 (attempt %d/%d): %s",
+                        attempt,
+                        max_retries,
+                        safe_error_summary(e),
+                    )
+                    key_pool.report_rate_limit(current_key)
+                    if attempt >= max_retries:
+                        break
+                    current_key = key_pool.acquire()
+                    new_client = _new_openai_client(current_key)
+                    if active_client is not client:
+                        _close_client(active_client)
+                    active_client = new_client
+                    logger.info("[agent] Rotated OpenAI key")
+                    continue
+
+                transient = is_transient_error(e)
                 logger.warning(
-                    "[agent] OpenAI 429 (attempt %d/%d): %s",
+                    "[agent] OpenAI Responses attempt %d/%d failed: %s",
                     attempt,
                     max_retries,
                     safe_error_summary(e),
                 )
-                key_pool.report_rate_limit(current_key)
-                current_key = key_pool.acquire()
-                client = _new_openai_client(current_key)
-                logger.info("[agent] Rotated OpenAI key")
-                continue
 
-            logger.warning(
-                "[agent] OpenAI Responses attempt %d/%d failed: %s",
-                attempt,
-                max_retries,
-                safe_error_summary(e),
-            )
+                if transient and attempt < max_retries:
+                    wait = min(2**attempt, 30)
+                    logger.info("[agent] Transient OpenAI error, retrying in %ds", wait)
+                    time.sleep(wait)
+                elif not transient:
+                    raise
+    except BaseException:
+        if active_client is not client:
+            _close_client(active_client)
+        raise
 
-            if is_transient_error(e) and attempt < max_retries:
-                wait = min(2**attempt, 30)
-                logger.info("[agent] Transient OpenAI error, retrying in %ds", wait)
-                time.sleep(wait)
-            elif not is_transient_error(e):
-                raise
-
+    if active_client is not client:
+        _close_client(active_client)
     raise ValueError(
         f"OpenAI Responses call failed after {max_retries} retries: "
         f"{safe_error_summary(last_err)}"

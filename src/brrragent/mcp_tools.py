@@ -141,6 +141,7 @@ class _Connection:
     transport: McpTransport
     session: ClientSession | None = None
     stack: AsyncExitStack | None = None
+    in_flight: int = 0
 
 
 @dataclass
@@ -183,6 +184,7 @@ class McpToolCaller:
             transport=transport,
             headers=headers,
         )
+        self._servers_by_name = {server.name: server for server in self.servers}
         self.endpoint = self.servers[0].url or ""
         self.endpoints = tuple(server.url for server in self.servers if server.url)
         self.allowed_tools = _normalize_patterns(allowed_tools, default={"*"})
@@ -222,6 +224,9 @@ class McpToolCaller:
             thread = self._worker_thread
             if thread is None:
                 return
+            if not thread.is_alive():
+                self._worker_thread = None
+                return
             future: Future[Any] = Future()
             self._commands.put(_WorkerCommand("close", (), future))
             self._notify_worker()
@@ -232,10 +237,11 @@ class McpToolCaller:
 
     def refresh_tools(self) -> list[dict[str, Any]]:
         """Refresh tool catalogs from every configured server."""
+        schemas, routes = self._request("discover")
         with self._cache_lock:
-            self._tool_schemas = None
-            self._tool_routes = {}
-        return self._fetch_tool_schemas()
+            self._tool_schemas = schemas
+            self._tool_routes = routes
+            return list(schemas)
 
     def _start_worker_locked(self) -> None:
         if self._worker_thread is not None and self._worker_thread.is_alive():
@@ -255,14 +261,92 @@ class McpToolCaller:
         self._notify_worker()
         return future.result()
 
+    async def _close_connection(self, connection: _Connection) -> None:
+        if connection.stack is None:
+            return
+        stack = connection.stack
+        connection.stack = None
+        try:
+            await stack.aclose()
+        except BaseException as exc:
+            logger.debug("MCP session close failed: %s", safe_error_summary(exc))
+
+    async def _run_call_task(
+        self,
+        command: _WorkerCommand,
+        server: McpServerConfig,
+        connection: _Connection,
+        connections: dict[str, _Connection],
+        stale_connections: list[_Connection],
+        wakeup: asyncio.Event,
+    ) -> None:
+        _server_name, remote_name, arguments = command.arguments
+        failed = False
+        try:
+            if connection.session is None:
+                result = await asyncio.to_thread(
+                    self._legacy_call_tool, server, remote_name, arguments
+                )
+            else:
+                result = await connection.session.call_tool(
+                    remote_name,
+                    arguments,
+                    read_timeout_seconds=server.read_timeout,
+                )
+        except asyncio.CancelledError as exc:
+            failed = True
+            if not command.future.done():
+                command.future.set_exception(
+                    ConnectionError("MCP operation was cancelled by its transport")
+                )
+            logger.debug(
+                "MCP transport cancelled an operation: %s",
+                safe_error_summary(exc),
+            )
+        except Exception as exc:  # noqa: BLE001 - propagate through Future
+            failed = True
+            if not command.future.done():
+                command.future.set_exception(exc)
+        except BaseException:
+            failed = True
+            raise
+        else:
+            if not command.future.done():
+                command.future.set_result(result)
+        finally:
+            connection.in_flight -= 1
+            if failed and connection.session is not None:
+                if connections.get(server.name) is connection:
+                    connections.pop(server.name, None)
+                if connection not in stale_connections:
+                    stale_connections.append(connection)
+                wakeup.set()
+            elif connection.in_flight == 0 and connection in stale_connections:
+                wakeup.set()
+
     async def _worker(self) -> None:
         connections: dict[str, _Connection] = {}
+        stale_connections: list[_Connection] = []
+        in_flight: set[asyncio.Task[Any]] = set()
         wakeup = asyncio.Event()
+
+        async def drain_stale() -> None:
+            if not stale_connections:
+                return
+            still_busy: list[_Connection] = []
+            for conn in stale_connections:
+                if conn.in_flight == 0:
+                    await self._close_connection(conn)
+                else:
+                    still_busy.append(conn)
+            stale_connections[:] = still_busy
+
         with self._notify_lock:
             self._worker_loop = asyncio.get_running_loop()
             self._worker_wakeup = wakeup
         try:
             while True:
+                await drain_stale()
                 wakeup.clear()
                 try:
                     command = self._commands.get_nowait()
@@ -271,39 +355,77 @@ class McpToolCaller:
                     continue
                 try:
                     if command.operation == "close":
+                        if in_flight:
+                            await asyncio.gather(*in_flight, return_exceptions=True)
+                        await drain_stale()
                         command.future.set_result(None)
                         break
                     if command.operation == "discover":
                         result = await self._discover(connections)
                     elif command.operation == "call":
+                        if type(self)._call is McpToolCaller._call:
+                            server_name = command.arguments[0]
+                            server = self._servers_by_name[server_name]
+                            connection = await self._ensure_connection(
+                                server, connections
+                            )
+                            connection.in_flight += 1
+                            task = asyncio.create_task(
+                                self._run_call_task(
+                                    command,
+                                    server,
+                                    connection,
+                                    connections,
+                                    stale_connections,
+                                    wakeup,
+                                )
+                            )
+                            in_flight.add(task)
+                            task.add_done_callback(in_flight.discard)
+                            continue
                         result = await self._call(connections, *command.arguments)
                     else:
                         raise ValueError(
                             f"Unknown MCP worker operation: {command.operation}"
                         )
                 except asyncio.CancelledError as exc:
-                    command.future.set_exception(
-                        ConnectionError("MCP operation was cancelled by its transport")
-                    )
+                    if not command.future.done():
+                        command.future.set_exception(
+                            ConnectionError(
+                                "MCP operation was cancelled by its transport"
+                            )
+                        )
                     logger.debug(
                         "MCP transport cancelled an operation: %s",
                         safe_error_summary(exc),
                     )
                 except Exception as exc:  # noqa: BLE001 - propagate through Future
-                    command.future.set_exception(exc)
+                    if not command.future.done():
+                        command.future.set_exception(exc)
                 else:
-                    command.future.set_result(result)
+                    if not command.future.done():
+                        command.future.set_result(result)
         finally:
+            if in_flight:
+                await asyncio.gather(*in_flight, return_exceptions=True)
             with self._notify_lock:
                 self._worker_loop = None
                 self._worker_wakeup = None
+            for connection in reversed(stale_connections):
+                await self._close_connection(connection)
             for connection in reversed(connections.values()):
-                if connection.stack is not None:
-                    try:
-                        await connection.stack.aclose()
-                    except BaseException as exc:
-                        logger.debug(
-                            "MCP session close failed: %s", safe_error_summary(exc)
+                await self._close_connection(connection)
+            while True:
+                try:
+                    pending = self._commands.get_nowait()
+                except Empty:
+                    break
+                if not pending.future.done():
+                    if pending.operation == "close":
+                        pending.future.set_result(None)
+                    else:
+                        pending.future.set_exception(
+                            ConnectionError("MCP worker closed")
                         )
 
     async def _discover(
@@ -317,7 +439,7 @@ class McpToolCaller:
         for server in self.servers:
             connection = await self._ensure_connection(server, connections)
             if connection.session is None:
-                tools = self._legacy_list_tools(server)
+                tools = await asyncio.to_thread(self._legacy_list_tools, server)
             else:
                 tools = await _list_all_tools(connection.session)
 
@@ -347,10 +469,12 @@ class McpToolCaller:
         remote_name: str,
         arguments: dict[str, Any],
     ) -> Any:
-        server = next(server for server in self.servers if server.name == server_name)
+        server = self._servers_by_name[server_name]
         connection = await self._ensure_connection(server, connections)
         if connection.session is None:
-            return self._legacy_call_tool(server, remote_name, arguments)
+            return await asyncio.to_thread(
+                self._legacy_call_tool, server, remote_name, arguments
+            )
         try:
             return await connection.session.call_tool(
                 remote_name,
@@ -358,14 +482,9 @@ class McpToolCaller:
                 read_timeout_seconds=server.read_timeout,
             )
         except BaseException:
-            connections.pop(server.name, None)
-            if connection.stack is not None:
-                try:
-                    await connection.stack.aclose()
-                except BaseException as exc:
-                    logger.debug(
-                        "MCP failed session cleanup failed: %s", safe_error_summary(exc)
-                    )
+            if connections.get(server.name) is connection:
+                connections.pop(server.name, None)
+            await self._close_connection(connection)
             raise
 
     async def _ensure_connection(
@@ -495,6 +614,7 @@ class McpToolCaller:
     def _legacy_list_tools(self, server: McpServerConfig) -> list[dict[str, Any]]:
         tools: list[dict[str, Any]] = []
         cursor: str | None = None
+        seen_cursors: set[str] = set()
         while True:
             params = {"cursor": cursor} if cursor else {}
             data = self._legacy_request(
@@ -506,8 +626,9 @@ class McpToolCaller:
             result = data.get("result", {})
             tools.extend(result.get("tools", []))
             cursor = result.get("nextCursor")
-            if not cursor:
+            if not cursor or cursor in seen_cursors:
                 return tools
+            seen_cursors.add(cursor)
 
     def _legacy_call_tool(
         self,
@@ -535,6 +656,14 @@ class McpToolCaller:
                 self._tool_schemas = schemas
                 self._tool_routes = routes
             return self._tool_schemas
+
+    def _get_tool_route(self, name: str) -> tuple[str, str] | None:
+        with self._cache_lock:
+            if self._tool_schemas is None:
+                schemas, routes = self._request("discover")
+                self._tool_schemas = schemas
+                self._tool_routes = routes
+            return self._tool_routes.get(name)
 
     def get_filtered_schemas(self) -> list[dict[str, Any]]:
         """Return discovered schemas matching allowed patterns minus exclusions."""
@@ -565,8 +694,8 @@ class McpToolCaller:
                     "type": "function",
                     "function": {
                         "name": schema["name"],
-                        "description": schema.get("description", "")[:500],
-                        "parameters": _clean_schema(schema.get("inputSchema", {})),
+                        "description": (schema.get("description") or "")[:500],
+                        "parameters": _clean_schema(schema.get("inputSchema") or {}),
                     },
                 }
             )
@@ -586,8 +715,8 @@ class McpToolCaller:
             declarations.append(
                 gt.FunctionDeclaration(
                     name=schema["name"],
-                    description=schema.get("description", "")[:500],
-                    parameters=_clean_schema(schema.get("inputSchema", {})),
+                    description=(schema.get("description") or "")[:500],
+                    parameters=_clean_schema(schema.get("inputSchema") or {}),
                 )
             )
         if not declarations:
@@ -601,8 +730,7 @@ class McpToolCaller:
 
         logger.info("MCP call: %s(%s)", name, list(arguments.keys()))
         try:
-            self._fetch_tool_schemas()
-            route = self._tool_routes.get(name)
+            route = self._get_tool_route(name)
             if route is None:
                 return f"[Tool error: unknown MCP tool {name!r}]"
             result = self._request("call", *route, arguments)
@@ -620,13 +748,15 @@ class McpToolCaller:
 async def _list_all_tools(session: ClientSession) -> list[Any]:
     tools: list[Any] = []
     cursor: str | None = None
+    seen_cursors: set[str] = set()
     while True:
         params = PaginatedRequestParams(cursor=cursor) if cursor else None
         result = await session.list_tools(params=params)
         tools.extend(result.tools)
         cursor = result.next_cursor
-        if not cursor:
+        if not cursor or cursor in seen_cursors:
             return tools
+        seen_cursors.add(cursor)
 
 
 def _model_dump(value: Any) -> dict[str, Any]:
@@ -878,12 +1008,14 @@ def _matches_any(name: str, patterns: set[str]) -> bool:
 
 
 _default_caller: McpToolCaller | None = None
+_default_caller_lock = Lock()
 
 
 def has_configured_default_caller() -> bool:
     """Return whether default MCP environment URLs or singleton are configured."""
-    if _default_caller is not None:
-        return True
+    with _default_caller_lock:
+        if _default_caller is not None:
+            return True
     return bool(
         os.getenv("BRRRAGENT_MCP_URLS", "").strip()
         or os.getenv("BRRRAGENT_MCP_URL", "").strip()
@@ -893,14 +1025,19 @@ def has_configured_default_caller() -> bool:
 def get_default_caller() -> McpToolCaller:
     """Return the singleton MCP caller, initialized from environment URLs."""
     global _default_caller
-    if _default_caller is None:
-        _default_caller = McpToolCaller()
-    return _default_caller
+    with _default_caller_lock:
+        if _default_caller is None:
+            _default_caller = McpToolCaller()
+        return _default_caller
 
 
 def _close_default_caller() -> None:
-    if _default_caller is not None:
-        _default_caller.close()
+    global _default_caller
+    with _default_caller_lock:
+        caller = _default_caller
+        _default_caller = None
+    if caller is not None:
+        caller.close()
 
 
 atexit.register(_close_default_caller)

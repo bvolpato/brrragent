@@ -1583,3 +1583,73 @@ def test_get_codex_access_token_refreshes_once_across_threads(tmp_path, monkeypa
     saved = json.loads(auth_path.read_text())
     assert saved["openai"]["access"] == "access_new"
     assert saved["openai"]["refresh"] == "rt_new"
+
+
+def test_stream_parses_compact_sse_data_and_nested_retryable_error(
+    monkeypatch, streamed_codex_agent
+):
+    compact_completed = io.BytesIO(
+        b"data:null\n"
+        b'data:{"type":"response.completed","response":{"output":'
+        b'[{"type":"message","content":[{"type":"output_text","text":"compact ok"}]}]}}\n'
+    )
+    nested_rate_limit = _sse_response(
+        {
+            "type": "error",
+            "error": {"code": "rate_limit_exceeded", "message": "private"},
+        }
+    )
+    urlopen = Mock(side_effect=[nested_rate_limit, compact_completed])
+    sleep = Mock()
+    monkeypatch.setattr("brrragent.codex_oauth.request.urlopen", urlopen)
+    monkeypatch.setattr("brrragent.codex_oauth.time.sleep", sleep)
+
+    assert streamed_codex_agent(1) == "compact ok"
+    assert urlopen.call_count == 2
+    sleep.assert_called_once_with(2)
+
+
+def test_refresh_skips_cli_sync_when_paths_overlap(tmp_path, monkeypatch):
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    shared = codex_home / "auth.json"
+    shared.write_text(
+        json.dumps(
+            {
+                "openai": {
+                    "type": "oauth",
+                    "refresh": "rt_old",
+                    "access": "access_old",
+                    "expires": 1,
+                    "accountId": "acct_1",
+                    "idToken": "id_old",
+                }
+            }
+        )
+    )
+    monkeypatch.setenv("BRRRAGENT_AUTH_PATH", str(shared))
+    monkeypatch.setenv("BRRRAGENT_CODEX_HOME", str(codex_home))
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "access_token": "access_new",
+                    "refresh_token": "rt_new",
+                    "expires_in": 3600,
+                }
+            ).encode()
+
+    monkeypatch.setattr(
+        "brrragent.codex_oauth.request.urlopen", lambda *_a, **_kw: Response()
+    )
+
+    assert _get_codex_access_token() == ("access_new", "acct_1")
+    saved = json.loads(shared.read_text())
+    assert saved["openai"]["access"] == "access_new"

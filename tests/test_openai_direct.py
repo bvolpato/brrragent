@@ -662,3 +662,65 @@ def test_chat_agent_propagates_non_transient_error_without_retry(monkeypatch):
         )
 
     assert len(client.chat.completions.create.calls) == 1
+
+
+def test_to_responses_tool_preserves_already_flattened_tool():
+    flat = {
+        "type": "function",
+        "name": "search",
+        "description": "Search",
+        "parameters": {"type": "object", "properties": {"q": {"type": "string"}}},
+    }
+
+    assert _to_responses_tool(flat) == {
+        "type": "function",
+        "name": "search",
+        "description": "Search",
+        "parameters": {"type": "object", "properties": {"q": {"type": "string"}}},
+        "strict": False,
+    }
+
+
+def test_chat_agent_continues_when_tool_calls_have_stop_finish_reason(monkeypatch):
+    tool_call = SimpleNamespace(
+        id="call_1",
+        function=SimpleNamespace(name="lookup", arguments='{"query":"weather"}'),
+    )
+    client = fake_client(
+        chat_results=[
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=FakeChatMessage(tool_calls=[tool_call]),
+                        finish_reason="stop",
+                    )
+                ],
+                usage=None,
+            ),
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=FakeChatMessage(content="Final answer"),
+                        finish_reason="stop",
+                    )
+                ],
+                usage=None,
+            ),
+        ]
+    )
+    install_openai(monkeypatch, lambda **kwargs: client)
+    mcp = FakeMcp()
+
+    result = run_with_defaults(mcp=mcp, max_turns=2)
+
+    assert result == "Final answer"
+    assert mcp.calls == [("lookup", {"query": "weather"})]
+    assert len(client.chat.completions.create.calls) == 2
+
+
+def test_responses_helpers_handle_none_output():
+    from brrragent.openai_direct import _response_final_text, _response_function_calls
+
+    resp = SimpleNamespace(output=None, output_text=None)
+    assert _response_function_calls(resp) == []
+    assert _response_final_text(resp) == ""
