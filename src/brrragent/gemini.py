@@ -25,6 +25,20 @@ from brrragent.prompt_cache import AgentUsage, PromptCacheConfig, gemini_usage
 logger = logging.getLogger(__name__)
 
 
+def _close_client(client) -> None:
+    close = getattr(client, "close", None)
+    if callable(close):
+        close()
+
+
+def _output_text(parts) -> str:
+    return "\n".join(
+        part.text
+        for part in parts or []
+        if part.text and not getattr(part, "thought", False)
+    )
+
+
 def _extra_genai_declarations(extra_tools: list[dict], gt) -> list:
     from brrragent.mcp_tools import _clean_schema
 
@@ -83,6 +97,8 @@ def run_gemini_agent(
         raise ValueError("max_turns must be at least 0")
     if isinstance(max_retries, bool) or max_retries < 1:
         raise ValueError("max_retries must be at least 1")
+    if api_key is not None and not api_key.strip():
+        raise ValueError("api_key must not be empty")
 
     try:
         from google import genai
@@ -95,177 +111,180 @@ def run_gemini_agent(
     if key_pool is None and api_key is None:
         raise ValueError("Either api_key or key_pool must be provided")
 
-    selected_key = api_key or key_pool.acquire()
+    selected_key = api_key if api_key is not None else key_pool.acquire()
     client = genai.Client(
         api_key=selected_key, http_options=gt.HttpOptions(api_version="v1beta")
     )
-    tools = mcp.get_genai_tools()
-    if extra_tools:
-        extra_declarations = _extra_genai_declarations(extra_tools, gt)
-        if extra_declarations:
-            tools = list(tools or [])
-            if (
-                len(tools) == 1
-                and getattr(tools[0], "function_declarations", None) is not None
-            ):
-                tools = [
-                    gt.Tool(
-                        function_declarations=[
-                            *tools[0].function_declarations,
-                            *extra_declarations,
-                        ]
-                    )
-                ]
+
+    try:
+        tools = mcp.get_genai_tools()
+        if extra_tools:
+            extra_declarations = _extra_genai_declarations(extra_tools, gt)
+            if extra_declarations:
+                tools = list(tools or [])
+                if (
+                    len(tools) == 1
+                    and getattr(tools[0], "function_declarations", None) is not None
+                ):
+                    tools = [
+                        gt.Tool(
+                            function_declarations=[
+                                *tools[0].function_declarations,
+                                *extra_declarations,
+                            ]
+                        )
+                    ]
+                else:
+                    tools.append(gt.Tool(function_declarations=extra_declarations))
+
+        image_parts = []
+        for image in images:
+            decoded = _decode_data_url(image.url)
+            if decoded:
+                media_type, data = decoded
+                image_parts.append(gt.Part.from_bytes(data=data, mime_type=media_type))
             else:
-                tools.append(gt.Tool(function_declarations=extra_declarations))
-
-    image_parts = []
-    for image in images:
-        decoded = _decode_data_url(image.url)
-        if decoded:
-            media_type, data = decoded
-            image_parts.append(gt.Part.from_bytes(data=data, mime_type=media_type))
-        else:
-            image_parts.append(
-                gt.Part.from_uri(file_uri=image.url, mime_type=image.media_type)
-            )
-
-    contents: list[gt.Content] = [
-        gt.Content(role="user", parts=[gt.Part(text=user_prompt), *image_parts])
-    ]
-
-    del prompt_cache  # Gemini implicit caching uses the stable system/user prefix.
-
-    config_kwargs = dict(
-        system_instruction=system_prompt,
-        temperature=temperature,
-        max_output_tokens=max_tokens,
-        tools=tools,
-    )
-
-    if response_schema:
-        config_kwargs["response_mime_type"] = "application/json"
-        config_kwargs["response_schema"] = response_schema
-
-    config = gt.GenerateContentConfig(**config_kwargs)
-
-    def track_response(response):
-        nonlocal client, selected_key
-        if isinstance(response, tuple):
-            response, new_key = response
-            if new_key != selected_key:
-                selected_key = new_key
-                client = genai.Client(
-                    api_key=selected_key,
-                    http_options=gt.HttpOptions(api_version="v1beta"),
+                image_parts.append(
+                    gt.Part.from_uri(file_uri=image.url, mime_type=image.media_type)
                 )
 
-        if on_usage and getattr(response, "usage_metadata", None):
-            on_usage(gemini_usage(response.usage_metadata))
-        return response
+        contents: list[gt.Content] = [
+            gt.Content(role="user", parts=[gt.Part(text=user_prompt), *image_parts])
+        ]
 
-    for turn in range(max_turns):
-        logger.info(
-            "[agent] Turn %d/%d — calling %s (gemini direct)",
-            turn + 1,
-            max_turns,
-            model,
+        del prompt_cache  # Gemini implicit caching uses the stable system/user prefix.
+
+        config_kwargs = dict(
+            system_instruction=system_prompt,
+            temperature=temperature,
+            max_output_tokens=max_tokens,
+            tools=tools,
         )
 
+        if response_schema:
+            config_kwargs["response_mime_type"] = "application/json"
+            config_kwargs["response_schema"] = response_schema
+
+        config = gt.GenerateContentConfig(**config_kwargs)
+
+        def track_response(response):
+            nonlocal client, selected_key
+            if isinstance(response, tuple):
+                response, new_key, new_client = response
+                if new_client is not client:
+                    _close_client(client)
+                    client = new_client
+                selected_key = new_key
+
+            if on_usage and getattr(response, "usage_metadata", None):
+                on_usage(gemini_usage(response.usage_metadata))
+            return response
+
+        for turn in range(max_turns):
+            logger.info(
+                "[agent] Turn %d/%d — calling %s (gemini direct)",
+                turn + 1,
+                max_turns,
+                model,
+            )
+
+            response = track_response(
+                _call_with_retry(
+                    client=client,
+                    model=model,
+                    contents=contents,
+                    config=config,
+                    max_retries=max_retries,
+                    key_pool=key_pool,
+                    current_key=selected_key,
+                )
+            )
+
+            candidate = response.candidates[0] if response.candidates else None
+            if not candidate or candidate.content is None:
+                return "[No final response after max tool turns]"
+
+            model_parts = list(candidate.content.parts or [])
+
+            fn_calls = [p for p in model_parts if p.function_call is not None]
+
+            if not fn_calls:
+                final_text = _output_text(model_parts)
+                logger.info(
+                    "[agent] Final response after %d turn(s) (%d chars)",
+                    turn + 1,
+                    len(final_text),
+                )
+                return final_text
+
+            contents.append(gt.Content(role="model", parts=model_parts))
+
+            tool_result_parts = []
+            for fc in fn_calls:
+                fn_name = fc.function_call.name or ""
+                raw_args = fc.function_call.args
+                if raw_args is not None and not isinstance(raw_args, Mapping):
+                    logger.warning("[agent] Invalid tool arguments for %s", fn_name)
+                    result_text = INVALID_TOOL_ARGUMENTS
+                else:
+                    fn_args = dict(raw_args or {})
+                    logger.info("[agent] Tool: %s(%s)", fn_name, list(fn_args.keys()))
+                    if on_tool_call:
+                        on_tool_call(fn_name, fn_args)
+
+                    result_text = mcp.call_tool(fn_name, fn_args)
+                fn_response_kwargs = {
+                    "name": fn_name,
+                    "response": {"result": result_text},
+                }
+                call_id = getattr(fc.function_call, "id", None)
+                if call_id:
+                    fn_response_kwargs["id"] = call_id
+                tool_result_parts.append(
+                    gt.Part(function_response=gt.FunctionResponse(**fn_response_kwargs))
+                )
+
+            contents.append(gt.Content(role="user", parts=tool_result_parts))
+            logger.debug(
+                "[agent] Turn %d: executed %d tool(s)", turn + 1, len(fn_calls)
+            )
+
+        logger.warning(
+            "[agent] Reached max_turns=%d; requesting final answer without tools",
+            max_turns,
+        )
+        contents.append(
+            gt.Content(
+                role="user",
+                parts=[
+                    gt.Part(
+                        text="Stop calling tools. Provide the final answer using the evidence already gathered."
+                    )
+                ],
+            )
+        )
+        final_config = gt.GenerateContentConfig(**{**config_kwargs, "tools": []})
         response = track_response(
             _call_with_retry(
                 client=client,
                 model=model,
                 contents=contents,
-                config=config,
+                config=final_config,
                 max_retries=max_retries,
                 key_pool=key_pool,
                 current_key=selected_key,
             )
         )
-
         candidate = response.candidates[0] if response.candidates else None
-        if not candidate or candidate.content is None:
-            return "[No final response after max tool turns]"
-
-        model_parts = list(candidate.content.parts or [])
-
-        fn_calls = [p for p in model_parts if p.function_call is not None]
-
-        if not fn_calls:
-            text_parts = [p.text for p in model_parts if p.text]
-            final_text = "\n".join(text_parts)
-            logger.info(
-                "[agent] Final response after %d turn(s) (%d chars)",
-                turn + 1,
-                len(final_text),
-            )
-            return final_text
-
-        contents.append(gt.Content(role="model", parts=model_parts))
-
-        tool_result_parts = []
-        for fc in fn_calls:
-            fn_name = fc.function_call.name or ""
-            raw_args = fc.function_call.args
-            if raw_args is not None and not isinstance(raw_args, Mapping):
-                logger.warning("[agent] Invalid tool arguments for %s", fn_name)
-                result_text = INVALID_TOOL_ARGUMENTS
-            else:
-                fn_args = dict(raw_args or {})
-                logger.info("[agent] Tool: %s(%s)", fn_name, list(fn_args.keys()))
-                if on_tool_call:
-                    on_tool_call(fn_name, fn_args)
-
-                result_text = mcp.call_tool(fn_name, fn_args)
-            tool_result_parts.append(
-                gt.Part(
-                    function_response=gt.FunctionResponse(
-                        name=fn_name,
-                        response={"result": result_text},
-                    )
-                )
-            )
-
-        contents.append(gt.Content(role="user", parts=tool_result_parts))
-        logger.debug("[agent] Turn %d: executed %d tool(s)", turn + 1, len(fn_calls))
-
-    logger.warning(
-        "[agent] Reached max_turns=%d; requesting final answer without tools",
-        max_turns,
-    )
-    contents.append(
-        gt.Content(
-            role="user",
-            parts=[
-                gt.Part(
-                    text="Stop calling tools. Provide the final answer using the evidence already gathered."
-                )
-            ],
+        final_text = ""
+        if candidate and candidate.content:
+            final_text = _output_text(candidate.content.parts)
+        logger.info(
+            "[agent] Final no-tool response after max_turns (%d chars)", len(final_text)
         )
-    )
-    final_config = gt.GenerateContentConfig(**{**config_kwargs, "tools": []})
-    response = track_response(
-        _call_with_retry(
-            client=client,
-            model=model,
-            contents=contents,
-            config=final_config,
-            max_retries=max_retries,
-            key_pool=key_pool,
-            current_key=selected_key,
-        )
-    )
-    candidate = response.candidates[0] if response.candidates else None
-    final_text = ""
-    if candidate and candidate.content:
-        final_text = "\n".join(
-            part.text for part in candidate.content.parts or [] if part.text
-        )
-    logger.info(
-        "[agent] Final no-tool response after max_turns (%d chars)", len(final_text)
-    )
-    return final_text or "[No final response after max tool turns]"
+        return final_text or "[No final response after max tool turns]"
+    finally:
+        _close_client(client)
 
 
 def _call_with_retry(
@@ -283,7 +302,7 @@ def _call_with_retry(
     On 429 errors with a key_pool:
       - Evicts the current key from the pool
       - Acquires a fresh key and rebuilds the client
-      - Returns (response, new_key) tuple so caller can track the key change
+      - Returns (response, new_key, active_client) tuple so caller can reuse it
 
     Without a key_pool, 429s are retried with backoff like any transient error.
     """
@@ -291,57 +310,70 @@ def _call_with_retry(
         raise ValueError("max_retries must be at least 1")
 
     last_err = None
+    active_client = client
 
-    for attempt in range(1, max_retries + 1):
-        try:
-            resp = client.models.generate_content(
-                model=model,
-                contents=contents,
-                config=config,
-            )
-            if key_pool:
-                return (resp, current_key)
-            return resp
-        except Exception as e:
-            last_err = e
+    try:
+        for attempt in range(1, max_retries + 1):
+            try:
+                resp = active_client.models.generate_content(
+                    model=model,
+                    contents=contents,
+                    config=config,
+                )
+                if key_pool:
+                    return (resp, current_key, active_client)
+                return resp
+            except Exception as e:
+                last_err = e
 
-            if is_rate_limit_error(e) and key_pool:
+                if is_rate_limit_error(e) and key_pool:
+                    logger.warning(
+                        "[agent] Gemini 429 (attempt %d/%d): %s",
+                        attempt,
+                        max_retries,
+                        safe_error_summary(e),
+                    )
+                    # Evict and get a new key — may raise RateLimitExhausted
+                    key_pool.report_rate_limit(current_key)
+                    if attempt >= max_retries:
+                        break
+                    current_key = key_pool.acquire()
+
+                    from google import genai
+                    from google.genai import types as gt
+
+                    new_client = genai.Client(
+                        api_key=current_key,
+                        http_options=gt.HttpOptions(api_version="v1beta"),
+                    )
+                    if active_client is not client:
+                        _close_client(active_client)
+                    active_client = new_client
+                    logger.info("[agent] Rotated Gemini key, retrying immediately")
+                    continue
+
+                is_transient = is_transient_error(e)
+
                 logger.warning(
-                    "[agent] Gemini 429 (attempt %d/%d): %s",
+                    "[agent] Gemini call attempt %d/%d failed: %s",
                     attempt,
                     max_retries,
                     safe_error_summary(e),
                 )
-                # Evict and get a new key — may raise RateLimitExhausted
-                key_pool.report_rate_limit(current_key)
-                current_key = key_pool.acquire()
 
-                from google import genai
-                from google.genai import types as gt
+                if is_transient and attempt < max_retries:
+                    wait = min(2**attempt, 30)
+                    logger.info("[agent] Transient error, retrying in %ds...", wait)
+                    time.sleep(wait)
+                elif not is_transient:
+                    raise
+    except BaseException:
+        if active_client is not client:
+            _close_client(active_client)
+        raise
 
-                client = genai.Client(
-                    api_key=current_key,
-                    http_options=gt.HttpOptions(api_version="v1beta"),
-                )
-                logger.info("[agent] Rotated Gemini key, retrying immediately")
-                continue
-
-            is_transient = is_transient_error(e)
-
-            logger.warning(
-                "[agent] Gemini call attempt %d/%d failed: %s",
-                attempt,
-                max_retries,
-                safe_error_summary(e),
-            )
-
-            if is_transient and attempt < max_retries:
-                wait = min(2**attempt, 30)
-                logger.info("[agent] Transient error, retrying in %ds...", wait)
-                time.sleep(wait)
-            elif not is_transient:
-                raise
-
+    if active_client is not client:
+        _close_client(active_client)
     raise ValueError(
         f"Gemini API call failed after {max_retries} retries: "
         f"{safe_error_summary(last_err)}"

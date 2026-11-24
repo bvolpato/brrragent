@@ -30,8 +30,8 @@ class FakeMessage:
         self.content = content
         self.tool_calls = tool_calls or []
 
-    def model_dump(self):
-        return {
+    def model_dump(self, *, exclude_none=False):
+        payload = {
             "role": self.role,
             "content": self.content,
             "tool_calls": [
@@ -46,6 +46,9 @@ class FakeMessage:
                 for call in self.tool_calls
             ],
         }
+        if exclude_none:
+            payload = {k: v for k, v in payload.items() if v is not None}
+        return payload
 
 
 class FakeMcp:
@@ -81,20 +84,12 @@ class FakeOpenAIFactory:
         self.tool_response = tool_response
         self.final_response = final_response
         self.client_keys = []
+        self.closed_keys = []
         self.calls = []
-        self.second_key_clients = 0
+        self.second_key_calls = 0
 
     def __call__(self, *, api_key, **client_kwargs):
         self.client_keys.append(api_key)
-        if api_key == "second-fake-key":
-            self.second_key_clients += 1
-            response = (
-                self.tool_response
-                if self.second_key_clients == 1
-                else self.final_response
-            )
-        else:
-            response = RuntimeError("429 rate limit")
         factory = self
 
         class Completions:
@@ -106,12 +101,18 @@ class FakeOpenAIFactory:
                         **copy.deepcopy(kwargs),
                     }
                 )
-                if isinstance(response, Exception):
-                    raise response
-                return response
+                if api_key == "second-fake-key":
+                    factory.second_key_calls += 1
+                    return (
+                        factory.tool_response
+                        if factory.second_key_calls == 1
+                        else factory.final_response
+                    )
+                raise RuntimeError("429 rate limit")
 
         return SimpleNamespace(
             chat=SimpleNamespace(completions=Completions()),
+            close=lambda: factory.closed_keys.append(api_key),
         )
 
 
@@ -256,8 +257,8 @@ def test_openrouter_agent_rotates_key_and_completes_tool_loop(monkeypatch):
     assert result == '{"answer":"done"}'
     assert pool.acquired == ["first-fake-key", "second-fake-key"]
     assert pool.rate_limited == ["first-fake-key"]
-    assert factory.client_keys[0] == "first-fake-key"
-    assert set(factory.client_keys[1:]) == {"second-fake-key"}
+    assert factory.client_keys == ["first-fake-key", "second-fake-key"]
+    assert factory.closed_keys == ["first-fake-key", "second-fake-key"]
     assert all(call["client_kwargs"]["max_retries"] == 0 for call in factory.calls)
     assert mcp.calls == [("lookup", {"query": "brrragent"})]
     assert tool_events == mcp.calls
@@ -336,3 +337,92 @@ def test_openrouter_agent_sends_image_content(monkeypatch):
             "detail": "high",
         },
     }
+
+
+def test_openrouter_omits_tools_when_empty():
+    client = DummyClient()
+
+    openrouter._call_with_retry(
+        client=client,
+        model="provider/test-model",
+        messages=[],
+        tools=[],
+        temperature=0.7,
+        max_tokens=100,
+        max_retries=1,
+        base_url="https://openrouter.ai/api/v1",
+    )
+
+    assert "tools" not in client.chat.completions.calls[0]
+
+
+def test_openrouter_continues_loop_when_tool_calls_have_stop_finish_reason(monkeypatch):
+    tool_call = SimpleNamespace(
+        id="tool-call-1",
+        function=SimpleNamespace(name="lookup", arguments='{"query":"x"}'),
+    )
+    tool_response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=FakeMessage(content=None, tool_calls=[tool_call]),
+                finish_reason="stop",
+            )
+        ],
+        usage=None,
+    )
+    final_response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=FakeMessage(content="answer after tool"),
+                finish_reason="stop",
+            )
+        ],
+        usage=None,
+    )
+    factory = FakeOpenAIFactory(tool_response, final_response)
+    monkeypatch.setattr("openai.OpenAI", factory)
+    mcp = FakeMcp()
+
+    result = openrouter.run_openrouter_agent(
+        system_prompt="system",
+        user_prompt="question",
+        model="provider/test-model",
+        api_key="second-fake-key",
+        base_url="https://provider.example/v1",
+        mcp=mcp,
+        extra_tools=None,
+        max_turns=3,
+        temperature=0.2,
+        max_tokens=100,
+        max_retries=1,
+        on_tool_call=None,
+        response_schema=None,
+    )
+
+    assert result == "answer after tool"
+    assert mcp.calls == [("lookup", {"query": "x"})]
+    assert len(factory.calls) == 2
+
+
+def test_openrouter_handles_empty_choices(monkeypatch):
+    empty_response = SimpleNamespace(choices=[], usage=None)
+    factory = FakeOpenAIFactory(empty_response, empty_response)
+    monkeypatch.setattr("openai.OpenAI", factory)
+
+    result = openrouter.run_openrouter_agent(
+        system_prompt="system",
+        user_prompt="question",
+        model="provider/test-model",
+        api_key="second-fake-key",
+        base_url="https://provider.example/v1",
+        mcp=FakeMcp(),
+        extra_tools=None,
+        max_turns=1,
+        temperature=0.2,
+        max_tokens=100,
+        max_retries=1,
+        on_tool_call=None,
+        response_schema=None,
+    )
+
+    assert result == "[No final response after max tool turns]"

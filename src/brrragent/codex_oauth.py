@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import fcntl
+import http.client
 import json
 import logging
 import os
@@ -361,6 +362,9 @@ def _refresh_access_token(openai_auth: dict) -> tuple[dict, str, str | None]:
     except Exception as exc:
         raise ValueError(f"Codex OAuth refresh failed: {exc}") from exc
 
+    if not isinstance(payload, dict):
+        raise ValueError("Codex OAuth refresh returned invalid JSON payload")
+
     access_token = payload.get("access_token")
     if not access_token:
         raise ValueError("Codex OAuth refresh returned no access_token")
@@ -423,7 +427,8 @@ def _get_codex_access_token() -> tuple[str, str | None]:
         refreshed_auth, access_token, account_id = _refresh_access_token(openai_auth)
         auth["openai"] = refreshed_auth
         _write_auth_file(path, auth)
-        _sync_codex_cli_auth(refreshed_auth)
+        if _codex_cli_auth_path().resolve() != path.resolve():
+            _sync_codex_cli_auth(refreshed_auth)
         return access_token, account_id
 
 
@@ -530,9 +535,9 @@ def _stream_codex_response(
         with response as resp:
             for raw_line in resp:
                 line = raw_line.decode(errors="replace").strip()
-                if not line.startswith("data: "):
+                if not line.startswith("data:"):
                     continue
-                data = line[6:]
+                data = line[6:] if line.startswith("data: ") else line[5:]
                 if data == "[DONE]":
                     completed = True
                     break
@@ -540,16 +545,31 @@ def _stream_codex_response(
                     event = json.loads(data)
                 except json.JSONDecodeError:
                     continue
+                if not isinstance(event, dict):
+                    continue
 
                 event_type = event.get("type")
                 response_obj = event.get("response")
                 if event_type in {"response.failed", "response.incomplete", "error"}:
-                    details = (
-                        event
-                        if event_type == "error"
-                        else (response_obj or {}).get("error") or {}
-                    )
-                    raise _CodexStreamError(event_type, details.get("code"))
+                    if event_type == "error":
+                        nested_error = event.get("error")
+                        error_code = (
+                            nested_error.get("code")
+                            if isinstance(nested_error, dict)
+                            else None
+                        ) or event.get("code")
+                    else:
+                        nested_error = (
+                            response_obj.get("error")
+                            if isinstance(response_obj, dict)
+                            else None
+                        )
+                        error_code = (
+                            nested_error.get("code")
+                            if isinstance(nested_error, dict)
+                            else None
+                        )
+                    raise _CodexStreamError(event_type, error_code)
 
                 if event_type == "response.output_text.delta" and event.get("delta"):
                     text_parts.append(event["delta"])
@@ -632,7 +652,14 @@ def _is_transient_error(err: Exception) -> bool:
         return err.event_type == "unexpected_eof" or err.code in _RETRYABLE_STREAM_CODES
     if isinstance(err, _CodexHTTPError):
         return err.status_code in _RETRYABLE_HTTP_STATUS_CODES
-    if isinstance(err, TimeoutError):
+    if isinstance(
+        err,
+        (
+            TimeoutError,
+            http.client.IncompleteRead,
+            http.client.RemoteDisconnected,
+        ),
+    ):
         return True
     if isinstance(err, error.URLError) and isinstance(err.reason, TimeoutError):
         return True
@@ -674,7 +701,7 @@ def run_codex_oauth_agent(
         ),
     )
 
-    tools = mcp.get_openai_tools()
+    tools = list(mcp.get_openai_tools() or ())
     if extra_tools:
         tools.extend(extra_tools)
 

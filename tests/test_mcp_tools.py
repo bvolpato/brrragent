@@ -888,3 +888,157 @@ def test_worker_wakes_on_commands_without_polling_sleep(monkeypatch):
     ]
     with FakeMcpToolCaller(responses) as caller:
         assert caller.call_tool("lookup", {}) == "found"
+
+
+def test_concurrent_tool_calls_run_in_parallel_without_serializing():
+    from concurrent.futures import ThreadPoolExecutor
+
+    two_entered = Event()
+    in_flight = 0
+    in_flight_lock = mcp_tools.Lock()
+
+    class ParallelFakeCaller(McpToolCaller):
+        def __init__(self):
+            super().__init__(
+                endpoint="https://mcp.example.test",
+                transport="legacy_json",
+            )
+
+        def _legacy_request(self, server, payload, timeout):
+            nonlocal in_flight
+            if payload["method"] == "tools/list":
+                return {"result": {"tools": [{"name": "slow"}]}}
+            with in_flight_lock:
+                in_flight += 1
+                if in_flight >= 2:
+                    two_entered.set()
+            assert two_entered.wait(timeout=2), "concurrent MCP calls were serialized"
+            return {
+                "result": {
+                    "content": [
+                        {"type": "text", "text": str(payload["params"]["arguments"])}
+                    ]
+                }
+            }
+
+    with ParallelFakeCaller() as caller:
+        caller.get_filtered_schemas()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(caller.call_tool, "slow", {"i": i}) for i in (1, 2)]
+            results = [f.result(timeout=5) for f in futures]
+
+    assert sorted(results) == ["{'i': 1}", "{'i': 2}"]
+
+
+def test_null_description_and_input_schema_do_not_crash():
+    caller = FakeMcpToolCaller(
+        [
+            {
+                "result": {
+                    "tools": [
+                        {
+                            "name": "bare",
+                            "description": None,
+                            "inputSchema": None,
+                        }
+                    ]
+                }
+            }
+        ]
+    )
+    with caller:
+        openai_tools = caller.get_openai_tools()
+    assert openai_tools == [
+        {
+            "type": "function",
+            "function": {
+                "name": "bare",
+                "description": "",
+                "parameters": {},
+            },
+        }
+    ]
+
+
+def test_list_all_tools_stops_on_repeated_cursor():
+    calls = 0
+
+    class LoopingSession:
+        async def list_tools(self, *, params=None):
+            nonlocal calls
+            calls += 1
+            return SimpleNamespace(tools=[{"name": f"t{calls}"}], next_cursor="same")
+
+    tools = asyncio.run(mcp_tools._list_all_tools(LoopingSession()))
+    assert [t["name"] for t in tools] == ["t1", "t2"]
+    assert calls == 2
+
+
+def test_async_session_calls_run_concurrently_and_teardown_stays_on_worker_task(
+    monkeypatch,
+):
+    from concurrent.futures import ThreadPoolExecutor
+
+    enter_tasks = []
+    exit_tasks = []
+    in_flight = 0
+    both_entered = None
+
+    @asynccontextmanager
+    async def fake_streamable_http_client(url, **kwargs):
+        enter_tasks.append(asyncio.current_task())
+        try:
+            yield object(), object()
+        finally:
+            exit_tasks.append(asyncio.current_task())
+
+    class ConcurrentSession:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return None
+
+        async def initialize(self):
+            return SimpleNamespace(protocolVersion="2025-11-25")
+
+        async def list_tools(self, *, params=None):
+            return SimpleNamespace(
+                tools=[
+                    {"name": "work", "inputSchema": {"type": "object"}},
+                    {"name": "fail", "inputSchema": {"type": "object"}},
+                ],
+                next_cursor=None,
+            )
+
+        async def call_tool(self, name, arguments, **kwargs):
+            nonlocal in_flight, both_entered
+            if name == "fail":
+                raise RuntimeError("boom")
+            if both_entered is None:
+                both_entered = asyncio.Event()
+            in_flight += 1
+            if in_flight >= 2:
+                both_entered.set()
+            await asyncio.wait_for(both_entered.wait(), timeout=2)
+            return {"content": [{"type": "text", "text": f"ok-{arguments['i']}"}]}
+
+    monkeypatch.setattr(
+        mcp_tools, "streamable_http_client", fake_streamable_http_client
+    )
+    monkeypatch.setattr(mcp_tools, "ClientSession", ConcurrentSession)
+
+    with McpToolCaller(
+        endpoint="https://mcp.example.test", transport="streamable_http"
+    ) as caller:
+        caller.get_filtered_schemas()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(caller.call_tool, "work", {"i": i}) for i in (1, 2)]
+            assert sorted(f.result(timeout=5) for f in futures) == ["ok-1", "ok-2"]
+        assert caller.call_tool("fail", {}) == "[Tool error: RuntimeError]"
+
+    assert len(enter_tasks) == 1
+    assert exit_tasks == enter_tasks

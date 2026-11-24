@@ -47,7 +47,10 @@ def _request_json(
         with request.urlopen(req, timeout=60) as response:
             value = json.loads(response.read().decode())
     except error.HTTPError as exc:
-        detail = exc.read().decode(errors="replace")[:500]
+        try:
+            detail = exc.read().decode(errors="replace")[:500]
+        finally:
+            exc.close()
         raise RuntimeError(f"{url} failed: HTTP {exc.code}; {detail}") from exc
     except (OSError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"{url} failed: {exc}") from exc
@@ -86,18 +89,21 @@ def _poll_device_authorization(device: dict[str, Any], timeout: int) -> dict[str
             with request.urlopen(req, timeout=min(60, remaining)) as response:
                 value = json.loads(response.read().decode())
         except error.HTTPError as exc:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError(
-                    f"Device authorization timed out after {timeout}s"
+            try:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        f"Device authorization timed out after {timeout}s"
+                    ) from exc
+                if exc.code in {403, 404}:
+                    time.sleep(min(interval + 3, remaining))
+                    continue
+                detail = exc.read().decode(errors="replace")[:500]
+                raise RuntimeError(
+                    f"{DEVICE_TOKEN_URL} failed: HTTP {exc.code}; {detail}"
                 ) from exc
-            if exc.code in {403, 404}:
-                time.sleep(min(interval + 3, remaining))
-                continue
-            detail = exc.read().decode(errors="replace")[:500]
-            raise RuntimeError(
-                f"{DEVICE_TOKEN_URL} failed: HTTP {exc.code}; {detail}"
-            ) from exc
+            finally:
+                exc.close()
         except (OSError, json.JSONDecodeError) as exc:
             if time.monotonic() >= deadline:
                 raise TimeoutError(

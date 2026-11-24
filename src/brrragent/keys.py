@@ -74,10 +74,10 @@ class KeyPool:
     """
 
     def __init__(self, keys: list[str], name: str = "api"):
-        all_keys = [k.strip() for k in keys if k.strip()]
+        all_keys = list(dict.fromkeys(k.strip() for k in keys if k.strip()))
         if not all_keys:
             raise ValueError(f"KeyPool({name}) requires at least one key")
-        self._all_keys = list(all_keys)
+        self._all_keys = all_keys
         self._active: set[str] = set(all_keys)
         self._evicted: set[str] = set()
         self._lock = threading.Lock()

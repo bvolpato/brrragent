@@ -244,6 +244,8 @@ def run_agent(
         raise ValueError("max_turns must be at least 0")
     if isinstance(max_retries, bool) or max_retries < 1:
         raise ValueError("max_retries must be at least 1")
+    if api_key is not None and not api_key.strip():
+        raise ValueError("api_key must not be empty")
 
     image_inputs = tuple(images or ())
     if any(not isinstance(image, ImageInput) for image in image_inputs):
@@ -261,63 +263,41 @@ def run_agent(
             else _NoopMcpCaller()
         )
 
-    # Build pools from env vars if not explicitly provided
-    if gemini_key_pool is None:
-        gemini_csv = os.environ.get("GEMINI_API_KEY", "")
-        if gemini_csv.strip():
-            gemini_key_pool = KeyPool.from_csv(gemini_csv, name="gemini")
+    # Smart routing: only resolve env pools needed for the matched route
+    if api_key is None and _is_google_model(model):
+        if gemini_key_pool is None:
+            gemini_csv = os.environ.get("GEMINI_API_KEY", "")
+            if gemini_csv.strip():
+                gemini_key_pool = KeyPool.from_csv(gemini_csv, name="gemini")
 
-    if openrouter_key_pool is None:
-        or_csv = os.environ.get("OPENROUTER_API_KEY", "")
-        if or_csv.strip():
-            openrouter_key_pool = KeyPool.from_csv(or_csv, name="openrouter")
+        if gemini_key_pool is not None:
+            from brrragent.gemini import run_gemini_agent
 
-    if openai_key_pool is None:
-        openai_keys = _keys_from_envs(
-            "OPENAI_API_KEY_PERSONAL",
-            "OPENAI_API_KEY",
-            "OPENAI_API_KEY_CORP",
-        )
-        if openai_keys:
-            openai_key_pool = KeyPool(openai_keys, name="openai")
+            bare_model = _get_gemini_model_name(model)
+            logger.info(
+                "[agent] Using Gemini direct (model=%s, pool=%s)",
+                bare_model,
+                gemini_key_pool.status(),
+            )
+            return run_gemini_agent(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                model=bare_model,
+                key_pool=gemini_key_pool,
+                mcp=mcp,
+                extra_tools=extra_tools,
+                max_turns=max_turns,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                max_retries=max_retries,
+                on_tool_call=on_tool_call,
+                response_schema=response_schema,
+                prompt_cache=prompt_cache,
+                on_usage=on_usage,
+                images=image_inputs,
+            )
 
-    # Smart routing: decide which backend to use
-    use_gemini_direct = (
-        _is_google_model(model) and gemini_key_pool is not None and api_key is None
-    )
-    use_openai_direct = (
-        _is_openai_model(model) and openai_key_pool is not None and api_key is None
-    )
-    use_codex_oauth = _use_codex_oauth_backend(model, api_key)
-
-    if use_gemini_direct:
-        from brrragent.gemini import run_gemini_agent
-
-        bare_model = _get_gemini_model_name(model)
-        logger.info(
-            "[agent] Using Gemini direct (model=%s, pool=%s)",
-            bare_model,
-            gemini_key_pool.status(),
-        )
-        return run_gemini_agent(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            model=bare_model,
-            key_pool=gemini_key_pool,
-            mcp=mcp,
-            extra_tools=extra_tools,
-            max_turns=max_turns,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            max_retries=max_retries,
-            on_tool_call=on_tool_call,
-            response_schema=response_schema,
-            prompt_cache=prompt_cache,
-            on_usage=on_usage,
-            images=image_inputs,
-        )
-
-    if use_codex_oauth:
+    if _use_codex_oauth_backend(model, api_key):
         from brrragent.codex_oauth import codex_auth_context, run_codex_oauth_agent
 
         logger.info("[agent] Using Codex OAuth (model=%s)", model)
@@ -342,31 +322,41 @@ def run_agent(
         with codex_auth_context(codex_auth):
             return run_codex_oauth_agent(**kwargs)
 
-    if use_openai_direct:
-        from brrragent.openai_direct import run_openai_agent
+    if api_key is None and _is_openai_model(model):
+        if openai_key_pool is None:
+            openai_keys = _keys_from_envs(
+                "OPENAI_API_KEY_PERSONAL",
+                "OPENAI_API_KEY",
+                "OPENAI_API_KEY_CORP",
+            )
+            if openai_keys:
+                openai_key_pool = KeyPool(openai_keys, name="openai")
 
-        logger.info(
-            "[agent] Using OpenAI direct (model=%s, pool=%s)",
-            model,
-            openai_key_pool.status(),
-        )
-        return run_openai_agent(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            model=model,
-            key_pool=openai_key_pool,
-            mcp=mcp,
-            extra_tools=extra_tools,
-            max_turns=max_turns,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            max_retries=max_retries,
-            on_tool_call=on_tool_call,
-            response_schema=response_schema,
-            prompt_cache=prompt_cache,
-            on_usage=on_usage,
-            images=image_inputs,
-        )
+        if openai_key_pool is not None:
+            from brrragent.openai_direct import run_openai_agent
+
+            logger.info(
+                "[agent] Using OpenAI direct (model=%s, pool=%s)",
+                model,
+                openai_key_pool.status(),
+            )
+            return run_openai_agent(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                model=model,
+                key_pool=openai_key_pool,
+                mcp=mcp,
+                extra_tools=extra_tools,
+                max_turns=max_turns,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                max_retries=max_retries,
+                on_tool_call=on_tool_call,
+                response_schema=response_schema,
+                prompt_cache=prompt_cache,
+                on_usage=on_usage,
+                images=image_inputs,
+            )
 
     # Check for native provider routing (fireworks/, minimax/, etc.)
     native = _resolve_native_provider(model) if api_key is None else None
@@ -408,8 +398,13 @@ def run_agent(
     # Fallback: OpenRouter
     from brrragent.openrouter import run_openrouter_agent
 
+    if api_key is None and openrouter_key_pool is None:
+        or_csv = os.environ.get("OPENROUTER_API_KEY", "")
+        if or_csv.strip():
+            openrouter_key_pool = KeyPool.from_csv(or_csv, name="openrouter")
+
     effective_key = api_key
-    effective_pool = None if api_key else openrouter_key_pool
+    effective_pool = None if api_key is not None else openrouter_key_pool
 
     if effective_key is None and effective_pool is None:
         raise ValueError(

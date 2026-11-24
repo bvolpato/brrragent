@@ -45,3 +45,11 @@ def test_key_pool_logs_do_not_expose_key_fragments(caplog):
 
     assert key not in caplog.text
     assert key[-6:] not in caplog.text
+
+
+def test_key_pool_deduplicates_keys():
+    pool = KeyPool(["key-a", "key-a", "key-b"], name="test")
+
+    assert pool.total_count == 2
+    assert pool.active_count == 2
+    assert pool.status() == {"name": "test", "total": 2, "active": 2, "evicted": 0}

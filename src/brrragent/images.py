@@ -59,8 +59,14 @@ class ImageInput:
     ) -> "ImageInput":
         if not data:
             raise ValueError("Image bytes must not be empty")
+        if not media_type.startswith("image/"):
+            raise ValueError("Image media type must start with image/")
         encoded = base64.b64encode(data).decode("ascii")
-        return cls.from_base64(encoded, media_type=media_type, detail=detail)
+        return cls(
+            url=f"data:{media_type};base64,{encoded}",
+            detail=detail,
+            media_type=media_type,
+        )
 
     @classmethod
     def from_file(

@@ -603,3 +603,90 @@ def test_gemini_agent_rejects_non_mapping_tool_arguments(monkeypatch):
     assert calls[1]["contents"][-1].parts[0].function_response.response == {
         "result": INVALID_TOOL_ARGUMENTS
     }
+
+
+def test_gemini_agent_excludes_thought_parts_from_final_text(monkeypatch):
+    responses = iter(
+        [
+            _response(
+                SimpleNamespace(
+                    text="Internal reasoning summary",
+                    thought=True,
+                    function_call=None,
+                ),
+                SimpleNamespace(
+                    text='{"answer":"clean"}',
+                    thought=False,
+                    function_call=None,
+                ),
+            )
+        ]
+    )
+    _install_fake_google_sdk(
+        monkeypatch, lambda _key, _call_number, _kwargs: next(responses)
+    )
+
+    result = gemini.run_gemini_agent(
+        system_prompt="system",
+        user_prompt="question",
+        model="gemini-3.1-pro-preview",
+        api_key="fake-key",
+        mcp=FakeMcp(),
+        max_turns=1,
+        temperature=0,
+        max_tokens=100,
+        max_retries=1,
+        on_tool_call=None,
+        response_schema=None,
+    )
+
+    assert result == '{"answer":"clean"}'
+
+
+def test_gemini_agent_closes_clients_and_reuses_rotated_client(monkeypatch):
+    closed = []
+    created = []
+    responses = iter(
+        [
+            RuntimeError("429 RESOURCE_EXHAUSTED"),
+            _response(FakePart(function_call=SimpleNamespace(name="lookup", args={}))),
+            _response(FakePart(text="done")),
+        ]
+    )
+
+    class ClosingFakeClient:
+        def __init__(self, *, api_key, http_options=None):
+            created.append(api_key)
+            self.api_key = api_key
+            self.models = SimpleNamespace(generate_content=self.generate_content)
+
+        def generate_content(self, **_kwargs):
+            nxt = next(responses)
+            if isinstance(nxt, Exception):
+                raise nxt
+            return nxt
+
+        def close(self):
+            closed.append(self.api_key)
+
+    _install_fake_google_sdk(monkeypatch, lambda *_a: None)
+    sys.modules["google.genai"].Client = ClosingFakeClient
+    pool = RecordingKeyPool(["first-key", "second-key"])
+
+    result = gemini.run_gemini_agent(
+        system_prompt="system",
+        user_prompt="question",
+        model="gemini-test",
+        key_pool=pool,
+        mcp=FakeMcp(),
+        max_turns=2,
+        temperature=0,
+        max_tokens=100,
+        max_retries=2,
+        on_tool_call=None,
+        response_schema=None,
+    )
+
+    assert result == "done"
+    assert created == ["first-key", "second-key"]
+    assert closed == ["first-key", "second-key"]
